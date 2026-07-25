@@ -79,5 +79,7 @@ jobs:
             Firmware/HomeButtonsArduino/.pio/build/original_release/firmware.bin
             Firmware/HomeButtonsArduino/.pio/build/original_release/bootloader.bin
             Firmware/HomeButtonsArduino/.pio/build/original_release/partitions.bin
+            Firmware/HomeButtonsArduino/.pio/build/original_release/ota_data_initial.bin
             Firmware/HomeButtonsArduino/.pio/build/original_release/spiffs.bin
+            Firmware/HomeButtonsArduino/partitions.csv
           if-no-files-found: error
