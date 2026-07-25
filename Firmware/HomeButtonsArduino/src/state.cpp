@@ -154,7 +154,12 @@ void DeviceState::_load_factory(HardwareDefinition& hw) {
   factory_.model_id = hw.get_model_id();
   factory_.hw_version = hw.get_hw_version();
   factory_.unique_id = hw.get_unique_id();
-  ap_password_ = APPasswordType("HB-") + factory_.random_id.c_str();
+  // Derived from the serial number, NOT the random id: the AP SSID is
+  // "HB-<random_id>" and is broadcast, so a password built from the random
+  // id would be readable over the air by anyone in range. The serial does
+  // not appear in the SSID; it is shown on the Device Info screen as part
+  // of the unique id (HBTNS-<serial>-<random_id>).
+  ap_password_ = APPasswordType("HB-") + factory_.serial_number.c_str();
 }
 
 void DeviceState::save_all() {

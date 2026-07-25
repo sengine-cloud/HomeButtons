@@ -75,12 +75,17 @@ the wrong timestamp.
 
 ## Setup
 
-Hold two buttons for 5 s → settings → setup. The device starts a Wi-Fi access
-point; its password is derived per-device from the random ID printed on the
-case (upstream shipped the same hardcoded password on every unit).
+**→ [Configuration guide](docs/counter-guide.md)** — flashing, the setup portal,
+the n8n receiver, troubleshooting, and the compile-time tunables.
 
-Portal fields: device name, **webhook URL**, **auth token**, static IP settings,
-and the six button labels.
+The short version: hold any two buttons for 5 s → settings → button 1. The
+device starts an access point `HB-<random-id>` with password
+`HB-<serial-number>`, both unique per device and taken from the burnt eFuse.
+Portal fields are device name, **webhook URL**, **auth token**, static IP
+settings, and the six button labels.
+
+> The remaining pages under `docs/` are inherited from upstream and describe
+> the MQTT firmware. They do not apply to this fork.
 
 ## Building
 
