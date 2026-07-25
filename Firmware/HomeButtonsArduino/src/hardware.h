@@ -17,91 +17,73 @@ struct HardwareDefinition : public Logger {
   semver::version version;
 
   // ------ PIN definitions ------
-  uint8_t BTN1_PIN;
-  uint8_t BTN2_PIN;
-  uint8_t BTN3_PIN;
-  uint8_t BTN4_PIN;
-  uint8_t BTN5_PIN;
-  uint8_t BTN6_PIN;
+  uint8_t BTN1_PIN = 0;
+  uint8_t BTN2_PIN = 0;
+  uint8_t BTN3_PIN = 0;
+  uint8_t BTN4_PIN = 0;
+  uint8_t BTN5_PIN = 0;
+  uint8_t BTN6_PIN = 0;
 
-  bool BTN1_ACTIVE_HIGH;
-  bool BTN2_ACTIVE_HIGH;
-  bool BTN3_ACTIVE_HIGH;
-  bool BTN4_ACTIVE_HIGH;
-  bool BTN5_ACTIVE_HIGH;
-  bool BTN6_ACTIVE_HIGH;
+  bool BTN1_ACTIVE_HIGH = false;
+  bool BTN2_ACTIVE_HIGH = false;
+  bool BTN3_ACTIVE_HIGH = false;
+  bool BTN4_ACTIVE_HIGH = false;
+  bool BTN5_ACTIVE_HIGH = false;
+  bool BTN6_ACTIVE_HIGH = false;
 
-  uint8_t TOUCH_CLICK_PIN;
-  bool TOUCH_CLICK_ACTIVE_HIGH;
-  uint8_t TOUCH_INT_PIN;
-  uint8_t TOUCH_RST_PIN;
+  uint8_t LED1_PIN = 0;
+  uint8_t LED2_PIN = 0;
+  uint8_t LED3_PIN = 0;
+  uint8_t LED4_PIN = 0;
+  uint8_t LED5_PIN = 0;
+  uint8_t LED6_PIN = 0;
 
-  uint8_t LED1_PIN;
-  uint8_t LED2_PIN;
-  uint8_t LED3_PIN;
-  uint8_t LED4_PIN;
-  uint8_t LED5_PIN;
-  uint8_t LED6_PIN;
+  // I2C pins. No I2C peripheral is populated on this build (the temperature
+  // & humidity sensor has been removed); kept as board documentation.
+  uint8_t SDA = 0;
+  uint8_t SCL = 0;
 
-  uint8_t FL_LED_EN_PIN;
-  uint8_t FL_LED_PIN;
+  uint8_t VBAT_ADC = 0;
+  uint8_t CHARGER_STDBY = 0;
+  uint8_t BOOST_EN = 0;
+  uint8_t DC_IN_DETECT = 0;
+  uint8_t CHG_ENABLE = 0;
 
-  uint8_t SDA;
-  uint8_t SCL;
-  uint8_t SDA_1;
-  uint8_t SCL_1;
-  uint8_t VBAT_ADC;
-  uint8_t CHARGER_STDBY;
-  uint8_t BOOST_EN;
-  uint8_t DC_IN_DETECT;
-  uint8_t CHG_ENABLE;
-
-  uint8_t LIGHT_SEN_ADC;
-
-  uint8_t EINK_CS;
-  uint8_t EINK_DC;
-  uint8_t EINK_RST;
-  uint8_t EINK_BUSY;
+  uint8_t EINK_CS = 0;
+  uint8_t EINK_DC = 0;
+  uint8_t EINK_RST = 0;
+  uint8_t EINK_BUSY = 0;
 
   // ------ LED analog parameters ------
-  uint8_t LED1_CH;
-  uint8_t LED2_CH;
-  uint8_t LED3_CH;
-  uint8_t LED4_CH;
-  uint8_t LED5_CH;
-  uint8_t LED6_CH;
+  uint8_t LED1_CH = 0;
+  uint8_t LED2_CH = 0;
+  uint8_t LED3_CH = 0;
+  uint8_t LED4_CH = 0;
+  uint8_t LED5_CH = 0;
+  uint8_t LED6_CH = 0;
 
-  uint8_t FL_LED_CH;
-  uint8_t FL_LED_BRIGHT_DFLT;
-
-  uint8_t LED_RES;
-  uint16_t LED_FREQ;
-  uint16_t LED_MAX_PWM;
+  uint8_t LED_RES = 0;
+  uint16_t LED_FREQ = 0;
+  uint16_t LED_MAX_PWM = 0;
 
   // ------ battery reading ------
-  float BATT_DIVIDER;
-  float BATT_ADC_REF_VOLT;
-  float MIN_BATT_VOLT;
-  float BATT_HYSTERESIS_VOLT;
-  float WARN_BATT_VOLT;
-  float BATT_FULL_VOLT;
-  float BATT_EMPTY_VOLT;
-  float BATT_PRESENT_VOLT;
-  float DC_DETECT_VOLT;
-  float CHARGE_HYSTERESIS_VOLT;
+  float BATT_DIVIDER = 0;
+  float BATT_ADC_REF_VOLT = 0;
+  float MIN_BATT_VOLT = 0;
+  float BATT_HYSTERESIS_VOLT = 0;
+  float WARN_BATT_VOLT = 0;
+  float BATT_FULL_VOLT = 0;
+  float BATT_EMPTY_VOLT = 0;
+  float BATT_PRESENT_VOLT = 0;
+  float DC_DETECT_VOLT = 0;
+  float CHARGE_HYSTERESIS_VOLT = 0;
 
   // battery SoC linear approximation coefficients (used for lithium cells)
-  float BATT_SOC_EST_K;
-  float BATT_SOC_EST_N;
-
-  // atan SoC approximation coefficients (used for alkaline cells)
-  float BAT_SOC_EST_ATAN_A;
-  float BAT_SOC_EST_ATAN_B;
-  float BAT_SOC_EST_ATAN_C;
-  float BAT_SOC_EST_ATAN_D;
+  float BATT_SOC_EST_K = 0;
+  float BATT_SOC_EST_N = 0;
 
   // ------ wakeup ------
-  uint64_t WAKE_BITMASK;
+  uint64_t WAKE_BITMASK = 0;
 
   // ------ functions ------
   bool init();
@@ -113,6 +95,7 @@ struct HardwareDefinition : public Logger {
   uint8_t button_pin(uint8_t num);
   bool button_pressed(uint8_t num);
   uint8_t num_buttons_pressed();
+  bool any_button_pressed();
 
   void set_led(uint8_t ch, uint16_t brightness,
                uint16_t fade_time = LED_DEFAULT_FADE_TIME);
@@ -138,17 +121,6 @@ struct HardwareDefinition : public Logger {
   bool is_dc_connected();
   void enable_charger(bool enable);
 #endif
-
-#if defined(HAS_TOUCH_UI)
-  bool touch_click_pressed();
-#endif
-
-#if defined(HAS_FRONTLIGHT)
-  void set_frontlight(uint8_t brightness);
-#endif
-
-  bool any_button_pressed();
-  void read_temp_hmd(float &tempe, float &hmd, const bool fahrenheit = false);
 
   const char *get_serial_number() { return factory_params_.serial_number; }
   const char *get_random_id() { return factory_params_.random_id; }
@@ -180,13 +152,6 @@ struct HardwareDefinition : public Logger {
   void load_hw_rev_2_3();
   void load_hw_rev_2_4();
   void load_hw_rev_2_5();
-
-  void load_pro_hw_rev_0_1();
-
-  void load_mini_hw_rev_0_1();
-  void load_mini_hw_rev_1_1();
-
-  void load_industrial_hw_rev_1_0();
 
  private:
   struct {

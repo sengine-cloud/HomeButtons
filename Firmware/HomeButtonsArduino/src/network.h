@@ -2,12 +2,9 @@
 #define HOMEBUTTONS_NETWORK_H
 
 #include <Arduino.h>
-#include <PubSubClient.h>
 #include <WiFi.h>
 
 #include "state_machine.h"
-#include "mqtt_helper.h"  // For TopicType
-#include "freertos/queue.h"
 #include "logger.h"
 #include "state.h"
 
@@ -51,23 +48,11 @@ class NormalConnectState : public State<Network> {
   bool await_confirm_quick_wifi_settings_ = false;
 };
 
-class MQTTConnectState : public State<Network> {
- public:
-  using State<Network>::State;
-
-  void entry() override;
-  void loop() override;
-
-  const char *get_name() override { return "MQTTConnectState"; }
-
- private:
-  uint32_t start_time_ = 0;
-};
-
 class WifiConnectedState : public State<Network> {
  public:
   using State<Network>::State;
 
+  void entry() override;
   void loop() override;
 
   const char *get_name() override { return "WifiConnectedState"; }
@@ -83,41 +68,41 @@ class DisconnectState : public State<Network> {
   const char *get_name() override { return "DisconnectState"; }
 };
 
-class FullyConnectedState : public State<Network> {
+// Terminal state once the station is associated. Upstream had a further
+// MQTTConnectState/FullyConnectedState pair; with the webhook transport
+// there is no session to establish beyond Wi-Fi, so association is the
+// whole story.
+class ConnectedState : public State<Network> {
  public:
   using State<Network>::State;
 
   void entry() override;
   void loop() override;
 
-  const char *get_name() override { return "FullyConnectedState"; }
+  const char *get_name() override { return "ConnectedState"; }
 
  private:
   uint32_t last_conn_check_time_ = 0;
 };
 }  // namespace NetworkSMStates
 
-class Network;
-
 using NetworkStateMachine = StateMachine<
     Network, NetworkSMStates::IdleState, NetworkSMStates::QuickConnectState,
-    NetworkSMStates::NormalConnectState, NetworkSMStates::MQTTConnectState,
-    NetworkSMStates::WifiConnectedState, NetworkSMStates::DisconnectState,
-    NetworkSMStates::FullyConnectedState>;
+    NetworkSMStates::NormalConnectState, NetworkSMStates::WifiConnectedState,
+    NetworkSMStates::DisconnectState, NetworkSMStates::ConnectedState>;
 
 class Network : public NetworkStateMachine, public Logger {
  public:
   enum class State {
     DISCONNECTED,
     W_CONNECTED,
-    M_CONNECTED,
   };
 
   enum class Command { NONE, CONNECT, DISCONNECT };
 
-  explicit Network(DeviceState &device_state, TopicHelper &topics);
+  explicit Network(DeviceState &device_state);
   Network(const Network &) = delete;
-  ~Network();
+  ~Network() = default;
 
   void connect();
   void disconnect(bool erase = false);
@@ -130,13 +115,6 @@ class Network : public NetworkStateMachine, public Logger {
 
   int32_t get_rssi() { return WiFi.RSSI(); }
 
-  void publish(const TopicType &topic, const PayloadType &payload,
-               bool retained = false);
-  void publish(const TopicType &topic, const char *payload,
-               bool retained = false);
-  bool subscribe(const TopicType &topic);
-  void set_mqtt_callback(
-      std::function<void(const char *, const char *)> callback);
   void set_on_connect(std::function<void()> on_connect);
 
  private:
@@ -146,34 +124,18 @@ class Network : public NetworkStateMachine, public Logger {
   bool erase_ = false;
 
   DeviceState &device_state_;
-  WiFiClient wifi_client_;
-  PubSubClient mqtt_client_;
-  TopicHelper &topics_;
-  QueueHandle_t mqtt_publish_queue_ = nullptr;
   TaskHandle_t network_task_handle_ = nullptr;
 
-  struct PublishQueueElement {
-    TopicType topic;
-    PayloadType payload;
-    bool retained;
-  };
-
-  std::function<void(const char *, const char *)> usr_callback_;
   std::function<void()> on_connect_callback_;
 
   void _pre_wifi_connect();
-  bool _connect_mqtt();
-  void _mqtt_callback(const char *topic, uint8_t *payload, uint32_t length);
-  void _publish_unsafe(const TopicType &topic, const char *payload,
-                       bool retained = false);
 
   friend class NetworkSMStates::IdleState;
   friend class NetworkSMStates::QuickConnectState;
   friend class NetworkSMStates::NormalConnectState;
-  friend class NetworkSMStates::MQTTConnectState;
   friend class NetworkSMStates::WifiConnectedState;
   friend class NetworkSMStates::DisconnectState;
-  friend class NetworkSMStates::FullyConnectedState;
+  friend class NetworkSMStates::ConnectedState;
 };
 
 StaticIPConfig validate_static_ip_config(StaticIPConfig config);

@@ -1,0 +1,83 @@
+name: firmware
+
+# Upstream had no firmware build in CI at all — only a docs deploy — which is
+# how its `pro_*` targets drifted into a state that could not compile. This is
+# the gate that stops that happening again.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # ADR-0007 Form 2. This repo is public, so it cannot reach the org ARC
+    # runners (the Default runner group sets allows_public_repositories=false)
+    # and cannot read CI_RUNNER_MODE, which is a private-visibility org var.
+    # The expression therefore resolves to ubuntu-latest today — free and
+    # unmetered for public repos — but picks up ARC automatically if this
+    # repo is ever made private. Keep it byte-identical to the ADR form so
+    # the org drift gate matches it.
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'arc' && (vars.SELF_HOSTED_LABEL || 'arc-se-org-shared') || 'ubuntu-latest' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The toolchain is ~1 GB and the ESP-IDF/Arduino build pulls it fresh
+      # on every cold runner, so this cache is most of the wall-clock time.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('Firmware/HomeButtonsArduino/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        working-directory: Firmware/HomeButtonsArduino
+        run: pio run -e original_release
+
+      - name: Build SPIFFS image
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          python tools/make_icons.py
+          pio run -e original_release -t buildfs
+
+      # The app partition was 95.8% full before this fork stripped MQTT and
+      # the icon downloader. Fail loudly rather than discovering at flash
+      # time that the image no longer fits.
+      - name: Check flash headroom
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          set -euo pipefail
+          SIZE=$(stat -c%s .pio/build/original_release/firmware.bin)
+          LIMIT=$((0x1A0000))
+          PCT=$((SIZE * 100 / LIMIT))
+          echo "firmware.bin: ${SIZE} bytes of ${LIMIT} (${PCT}%)"
+          echo "firmware.bin: ${SIZE} / ${LIMIT} bytes (${PCT}%)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PCT" -ge 90 ]; then
+            echo "::error::firmware is ${PCT}% of the app partition"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-original
+          path: |
+            Firmware/HomeButtonsArduino/.pio/build/original_release/firmware.bin
+            Firmware/HomeButtonsArduino/.pio/build/original_release/bootloader.bin
+            Firmware/HomeButtonsArduino/.pio/build/original_release/partitions.bin
+            Firmware/HomeButtonsArduino/.pio/build/original_release/spiffs.bin
+          if-no-files-found: error

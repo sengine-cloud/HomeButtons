@@ -33,23 +33,14 @@ class DeviceState : public Logger {
   struct UserPreferences {
     DeviceName device_name;
     ButtonLabel btn_labels[NUM_BUTTONS];
-    uint16_t sensor_interval = 0;  // minutes
-    bool use_fahrenheit = false;
-    uint8_t led_amb_bright = 0;  // 0-100
-    BtnConfString btn_conf_string;
+    // Timer wake interval, used only to report battery level when nobody
+    // presses a button. Stored under the legacy "sen_itv" NVS key.
+    uint16_t heartbeat_interval = 0;  // minutes
 
     StaticIPConfig network;
 
-    struct {
-      String server = "";
-      int32_t port = 0;
-      String user = "";
-      String password = "";
-      String base_topic = "";
-      String discovery_prefix = "";
-    } mqtt;
-
-    IconServerType icon_server;
+    EndpointUrlType endpoint_url;
+    AuthTokenType auth_token;
   } user_preferences_;
 
   struct Persisted {
@@ -60,6 +51,12 @@ class DeviceState : public Logger {
     String last_sw_ver = "";
     bool user_awake_mode = false;
 
+    // Counters. Device is authoritative; the webhook receives absolute values.
+    int32_t counters[NUM_COUNTERS] = {0};
+    // Monotonic per-device sequence number, used by the receiver to dedupe
+    // retries so a replayed press does not notify twice.
+    uint32_t seq = 0;
+
     // Flags
     bool wifi_quick_connect = false;
     bool charge_complete_showing = false;
@@ -68,9 +65,7 @@ class DeviceState : public Logger {
     uint8_t failed_connections = 0;
     bool restart_to_wifi_setup = false;
     bool restart_to_setup = false;
-    bool send_discovery_config = false;
     bool silent_restart = false;
-    bool download_mdi_icons = false;
     bool connect_on_restart = false;
   } persisted_;
 
@@ -79,12 +74,9 @@ class DeviceState : public Logger {
     bool awake_mode = false;
     uint32_t schedule_wakeup_time = 0;
     uint32_t last_user_input_time = 0;
-    bool keep_frontlight_on = false;
   } flags_;
 
   struct Sensors {
-    float temperature = 0;
-    float humidity = 0;
     uint8_t battery_pct = 0;
     float battery_voltage = 0;
     bool charging = false;
@@ -102,13 +94,7 @@ class DeviceState : public Logger {
 
   // User preferences
   const UserPreferences& user_preferences() const { return user_preferences_; }
-  void set_mqtt_parameters(const String& server, int32_t port,
-                           const String& user, const String& password,
-                           const String& base_topic,
-                           const String& discovery_prefix) {
-    user_preferences_.mqtt = {server,   port,       user,
-                              password, base_topic, discovery_prefix};
-  }
+
   void set_static_ip_config(SSIDType ssid, const IPAddress& static_ip,
                             const IPAddress& gateway, const IPAddress& subnet,
                             const IPAddress& dns = IPAddress(),
@@ -134,44 +120,53 @@ class DeviceState : public Logger {
   void set_device_name(const DeviceName& device_name) {
     user_preferences_.device_name = device_name;
   }
-  uint16_t sensor_interval() const { return user_preferences_.sensor_interval; }
-  void set_sensor_interval(uint16_t interval_min) {
-    user_preferences_.sensor_interval = interval_min;
+
+  uint16_t heartbeat_interval() const {
+    return user_preferences_.heartbeat_interval;
   }
+  void set_heartbeat_interval(uint16_t interval_min) {
+    user_preferences_.heartbeat_interval = interval_min;
+  }
+
   const ButtonLabel& get_btn_label(uint8_t i) const;
   void set_btn_label(uint8_t i, const char* label);
 
-  bool get_use_fahrenheit() const { return user_preferences_.use_fahrenheit; }
-  StaticString<1> get_temp_unit() const {
-    return StaticString<1>(user_preferences_.use_fahrenheit ? "F" : "C");
+  const EndpointUrlType& endpoint_url() const {
+    return user_preferences_.endpoint_url;
   }
-  void set_temp_unit(StaticString<1> unit) {
-    bool f = unit == "F" || unit == "f";
-    user_preferences_.use_fahrenheit = f;
+  void set_endpoint_url(const EndpointUrlType& url) {
+    user_preferences_.endpoint_url = url;
   }
 
-  void set_led_brightness(uint8_t brightness) {
-    user_preferences_.led_amb_bright = brightness;
+  const AuthTokenType& auth_token() const {
+    return user_preferences_.auth_token;
+  }
+  void set_auth_token(const AuthTokenType& token) {
+    user_preferences_.auth_token = token;
   }
 
-  void set_btn_conf_string(const BtnConfString& btn_conf_string) {
-    BtnConfString btn_conf_string_upper(btn_conf_string);
-    btn_conf_string_upper.to_upper_case();
-    for (char& c : btn_conf_string_upper) {
-      if (c != 'B' && c != 'S') {
-        c = 'B';
-      }
-      user_preferences_.btn_conf_string = btn_conf_string_upper;
-    }
+  // Counters -----------------------------------------------------------
+  // idx is 0-based. Returns 0 for an out-of-range index rather than
+  // reading past the array.
+  int32_t counter(uint8_t idx) const {
+    if (idx >= NUM_COUNTERS) return 0;
+    return persisted_.counters[idx];
   }
 
-  void set_icon_server(const IconServerType& icon_server) {
-    if (!icon_server.empty()) {
-      user_preferences_.icon_server = icon_server;
-    } else {
-      user_preferences_.icon_server = ICON_URL_DFLT;
-    }
+  // Applies delta, clamps to [COUNTER_MIN, COUNTER_MAX], returns the new
+  // value. A clamped decrement below zero is a no-op rather than an error;
+  // the minus button is for corrections and should never go negative.
+  int32_t adjust_counter(uint8_t idx, int32_t delta) {
+    if (idx >= NUM_COUNTERS) return 0;
+    int64_t next = static_cast<int64_t>(persisted_.counters[idx]) + delta;
+    if (next < COUNTER_MIN) next = COUNTER_MIN;
+    if (next > COUNTER_MAX) next = COUNTER_MAX;
+    persisted_.counters[idx] = static_cast<int32_t>(next);
+    return persisted_.counters[idx];
   }
+
+  uint32_t seq() const { return persisted_.seq; }
+  uint32_t next_seq() { return ++persisted_.seq; }
 
   void save_user();
   void load_user();
@@ -199,7 +194,10 @@ class DeviceState : public Logger {
   SSIDType get_ap_ssid() const {
     return SSIDType("HB-") + factory_.random_id.c_str();
   }
-  const char* get_ap_password() const { return SETUP_AP_PASSWORD; }
+
+  // Per-device, derived from the eFuse random id which is printed on the
+  // case. Upstream shipped a single hardcoded password on every unit.
+  const char* get_ap_password() const { return ap_password_.c_str(); }
 
   void set_ip(const IPAddress& ip_address) {
     ip_address_.set("%u.%u.%u.%u", ip_address[0], ip_address[1], ip_address[2],
@@ -223,7 +221,7 @@ class DeviceState : public Logger {
   template <std::size_t MAX_SIZE>
   void _load_to_static_string(StaticString<MAX_SIZE>& destination,
                               const char* key, const char* defaultValue) {
-    char buffer[MAX_SIZE + 1];  // +1 for '\0' at the end
+    char buffer[MAX_SIZE + 1] = {};  // +1 for '\0' at the end
     auto ret = preferences_.getString(key, buffer, MAX_SIZE + 1);
     if (ret == 0)
       destination.set(defaultValue);
@@ -236,6 +234,7 @@ class DeviceState : public Logger {
 
   Preferences preferences_;
   StaticString<15> ip_address_;
+  APPasswordType ap_password_;
 };
 
 #endif  // HOMEBUTTONS_STATE_H

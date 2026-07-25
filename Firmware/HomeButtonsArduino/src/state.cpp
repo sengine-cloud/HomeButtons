@@ -5,21 +5,11 @@
 void DeviceState::save_user() {
   preferences_.begin("user", false);
   preferences_.putString("device_name", user_preferences_.device_name.c_str());
-  preferences_.putString("mqtt_srv", user_preferences_.mqtt.server);
-  preferences_.putUInt("mqtt_port", user_preferences_.mqtt.port);
-  preferences_.putString("mqtt_user", user_preferences_.mqtt.user);
-  preferences_.putString("mqtt_pass", user_preferences_.mqtt.password);
-  preferences_.putString("base_topic", user_preferences_.mqtt.base_topic);
-  preferences_.putString("disc_prefix",
-                         user_preferences_.mqtt.discovery_prefix);
   for (int i = 0; i < NUM_BUTTONS; i++) {
     preferences_.putString(StaticString<9>("btn%d_txt", i + 1).c_str(),
                            user_preferences_.btn_labels[i].c_str());
   }
-  preferences_.putUInt("sen_itv", user_preferences_.sensor_interval);
-  preferences_.putBool("use_f", user_preferences_.use_fahrenheit);
-  preferences_.putUInt("led_am_br", user_preferences_.led_amb_bright);
-  preferences_.putString("btn_conf", user_preferences_.btn_conf_string.c_str());
+  preferences_.putUInt("sen_itv", user_preferences_.heartbeat_interval);
   preferences_.putString("ssid", user_preferences_.network.ssid.c_str());
   preferences_.putString(
       "sta_ip",
@@ -36,7 +26,8 @@ void DeviceState::save_user() {
   preferences_.putString(
       "dns2",
       ip_address_to_static_string(user_preferences_.network.dns2).c_str());
-  preferences_.putString("icon_srv", user_preferences_.icon_server.c_str());
+  preferences_.putString("endpoint", user_preferences_.endpoint_url.c_str());
+  preferences_.putString("auth_tok", user_preferences_.auth_token.c_str());
   preferences_.end();
 }
 
@@ -45,30 +36,19 @@ void DeviceState::load_user() {
   _load_to_static_string(
       user_preferences_.device_name, "device_name",
       (DeviceName{DEVICE_NAME_DFLT} + " " + factory_.random_id).c_str());
-  user_preferences_.mqtt.server = preferences_.getString("mqtt_srv", "");
-  user_preferences_.mqtt.port =
-      preferences_.getUInt("mqtt_port", MQTT_PORT_DFLT);
-  user_preferences_.mqtt.user = preferences_.getString("mqtt_user", "");
-  user_preferences_.mqtt.password = preferences_.getString("mqtt_pass", "");
-  user_preferences_.mqtt.base_topic =
-      preferences_.getString("base_topic", BASE_TOPIC_DFLT);
-  user_preferences_.mqtt.discovery_prefix =
-      preferences_.getString("disc_prefix", DISCOVERY_PREFIX_DFLT);
 
+  // Defaults describe the counter layout: buttons 1/3 increment counters A/B
+  // and show the current value, buttons 2/4 decrement, 5/6 are unassigned.
+  static const char* kDefaultLabels[NUM_BUTTONS] = {"A 0", "A -1", "B 0",
+                                                    "B -1", "",    ""};
   for (int i = 0; i < NUM_BUTTONS; i++) {
     _load_to_static_string(user_preferences_.btn_labels[i],
                            StaticString<9>("btn%d_txt", i + 1).c_str(),
-                           StaticString<16>("mdi:numeric-%d", i + 1).c_str());
+                           kDefaultLabels[i]);
   }
 
-  user_preferences_.sensor_interval =
-      preferences_.getUInt("sen_itv", SEN_INTERVAL_DFLT);
-  user_preferences_.use_fahrenheit = preferences_.getBool("use_f", false);
-  user_preferences_.led_amb_bright =
-      preferences_.getUInt("led_am_br", LED_MAX_AMB_BRIGHT);
-
-  _load_to_static_string(user_preferences_.btn_conf_string, "btn_conf",
-                         BTN_CONF_DFLT);
+  user_preferences_.heartbeat_interval =
+      preferences_.getUInt("sen_itv", HEARTBEAT_INTERVAL_DFLT);
 
   _load_to_static_string(user_preferences_.network.ssid, "ssid", "");
   _load_to_ip_address(user_preferences_.network.static_ip, "sta_ip", "0.0.0.0");
@@ -77,8 +57,8 @@ void DeviceState::load_user() {
   _load_to_ip_address(user_preferences_.network.dns, "dns", "0.0.0.0");
   _load_to_ip_address(user_preferences_.network.dns2, "dns2", "0.0.0.0");
 
-  _load_to_static_string(user_preferences_.icon_server, "icon_srv",
-                         ICON_URL_DFLT);
+  _load_to_static_string(user_preferences_.endpoint_url, "endpoint", "");
+  _load_to_static_string(user_preferences_.auth_token, "auth_tok", "");
 
   preferences_.end();
 }
@@ -105,6 +85,11 @@ void DeviceState::save_persisted() {
   preferences_.putBool("setup_done", persisted_.setup_done);
   preferences_.putString("last_sw", persisted_.last_sw_ver);
   preferences_.putBool("u_awake", persisted_.user_awake_mode);
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    preferences_.putInt(StaticString<8>("cnt_%d", i).c_str(),
+                        persisted_.counters[i]);
+  }
+  preferences_.putUInt("seq", persisted_.seq);
   preferences_.putBool("wifi_qc", persisted_.wifi_quick_connect);
   preferences_.putBool("chg_cpt_shwn", persisted_.charge_complete_showing);
   preferences_.putBool("u_msg_shwn", persisted_.user_msg_showing);
@@ -112,20 +97,24 @@ void DeviceState::save_persisted() {
   preferences_.putUInt("faild_cons", persisted_.failed_connections);
   preferences_.putBool("rst_to_w_stp", persisted_.restart_to_wifi_setup);
   preferences_.putBool("rst_to_stp", persisted_.restart_to_setup);
-  preferences_.putBool("send_adisc", persisted_.send_discovery_config);
   preferences_.putBool("silent_rst", persisted_.silent_restart);
-  preferences_.putBool("dl_mdi", persisted_.download_mdi_icons);
   preferences_.putBool("con_on_r", persisted_.connect_on_restart);
   preferences_.end();
 }
 
 void DeviceState::load_persisted() {
-  preferences_.begin("persisted", false);
+  // Read-only: upstream opened this namespace read-write on every boot.
+  preferences_.begin("persisted", true);
   persisted_.low_batt_mode = preferences_.getBool("lb_mode", false);
   persisted_.wifi_done = preferences_.getBool("wifi_done", false);
   persisted_.setup_done = preferences_.getBool("setup_done", false);
   persisted_.last_sw_ver = preferences_.getString("last_sw", "");
   persisted_.user_awake_mode = preferences_.getBool("u_awake", false);
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    persisted_.counters[i] =
+        preferences_.getInt(StaticString<8>("cnt_%d", i).c_str(), 0);
+  }
+  persisted_.seq = preferences_.getUInt("seq", 0);
   persisted_.wifi_quick_connect = preferences_.getBool("wifi_qc", false);
   persisted_.charge_complete_showing =
       preferences_.getBool("chg_cpt_shwn", false);
@@ -135,9 +124,7 @@ void DeviceState::load_persisted() {
   persisted_.restart_to_wifi_setup =
       preferences_.getBool("rst_to_w_stp", false);
   persisted_.restart_to_setup = preferences_.getBool("rst_to_stp", false);
-  persisted_.send_discovery_config = preferences_.getBool("send_adisc", false);
   persisted_.silent_restart = preferences_.getBool("silent_rst", false);
-  persisted_.download_mdi_icons = preferences_.getBool("dl_mdi", false);
   persisted_.connect_on_restart = preferences_.getBool("con_on_r", false);
   preferences_.end();
 }
@@ -156,7 +143,6 @@ void DeviceState::clear_persisted_flags() {
   persisted_.restart_to_wifi_setup = false;
   persisted_.restart_to_setup = false;
   persisted_.silent_restart = false;
-  persisted_.download_mdi_icons = false;
   persisted_.connect_on_restart = false;
   save_all();
 }
@@ -168,6 +154,7 @@ void DeviceState::_load_factory(HardwareDefinition& hw) {
   factory_.model_id = hw.get_model_id();
   factory_.hw_version = hw.get_hw_version();
   factory_.unique_id = hw.get_unique_id();
+  ap_password_ = APPasswordType("HB-") + factory_.random_id.c_str();
 }
 
 void DeviceState::save_all() {
@@ -210,8 +197,10 @@ void DeviceState::set_btn_label(uint8_t i, const char* label) {
 
 void DeviceState::_load_to_ip_address(IPAddress& destination, const char* key,
                                       const char* defaultValue) {
-  char buffer[16];
-  auto ret = preferences_.getString(key, buffer, 16);
+  // Zero-initialised: Preferences::getString does not guarantee NUL
+  // termination on every path, and an IPv4 string is exactly at the limit.
+  char buffer[16] = {};
+  auto ret = preferences_.getString(key, buffer, sizeof(buffer));
   if (ret == 0)
     destination.fromString(defaultValue);
   else
