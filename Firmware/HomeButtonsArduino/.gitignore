@@ -14,3 +14,6 @@ sdkconfig.pro_debug
 # Generated per-build and deleted by pre_script.py
 sdkconfig.original_release
 sdkconfig.original_debug
+
+# CI artifact staging dir
+dist/

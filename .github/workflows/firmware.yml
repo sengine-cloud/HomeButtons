@@ -72,14 +72,27 @@ jobs:
             exit 1
           fi
 
+      # upload-artifact derives the archive layout from the common ancestor of
+      # its paths, so listing files by their build-tree location buries them
+      # under .pio/build/original_release/ in the download. Stage them in one
+      # flat directory instead, so unzipping gives you the images next to each
+      # other, ready to flash.
+      - name: Stage flash images
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp .pio/build/original_release/bootloader.bin \
+             .pio/build/original_release/partitions.bin \
+             .pio/build/original_release/ota_data_initial.bin \
+             .pio/build/original_release/firmware.bin \
+             .pio/build/original_release/spiffs.bin \
+             partitions.csv \
+             dist/
+          ls -l dist
+
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-original
-          path: |
-            Firmware/HomeButtonsArduino/.pio/build/original_release/firmware.bin
-            Firmware/HomeButtonsArduino/.pio/build/original_release/bootloader.bin
-            Firmware/HomeButtonsArduino/.pio/build/original_release/partitions.bin
-            Firmware/HomeButtonsArduino/.pio/build/original_release/ota_data_initial.bin
-            Firmware/HomeButtonsArduino/.pio/build/original_release/spiffs.bin
-            Firmware/HomeButtonsArduino/partitions.csv
+          path: Firmware/HomeButtonsArduino/dist/
           if-no-files-found: error
