@@ -147,15 +147,31 @@ void HBSetup::start_wifi_setup() {
     ESP.restart();
   }
 
-  // This portal has no save-params callback, so read the field back by hand
-  // before it is needed for the reconnect below.
+  // This portal has no save-params callback, so read the field back by hand.
+  //
+  // A changed country restarts immediately rather than carrying on to the
+  // connect below. Two reasons: the scan that just ran used the OLD region,
+  // so the network list you picked from was incomplete anyway, and changing
+  // the country switches the PHY init data - applying that to a live radio
+  // and connecting in the same breath is not dependable. Restarting makes
+  // the region take effect cleanly, and the next visit scans correctly.
   {
     CountryCodeType cc{wifi_country_param.getValue()};
     cc.to_upper_case();
     if (!(cc == app_.device_state_.wifi_country())) {
       app_.device_state_.set_wifi_country(cc);
-      app_.device_state_.save_user();
-      info("Wi-Fi country set to '%s'", cc.c_str());
+      app_.device_state_.persisted().restart_to_wifi_setup = true;
+      app_.device_state_.persisted().silent_restart = true;
+      app_.device_state_.save_all();
+      info("Wi-Fi country set to '%s', restarting to apply", cc.c_str());
+#if defined(HAS_DISPLAY)
+      app_.display_.disp_message_large(
+          (UIState::MessageType("Region\nset to\n") + cc.c_str() +
+           "\n\nrestarting")
+              .c_str());
+      delay(3000);
+#endif
+      ESP.restart();
     }
   }
 
@@ -219,6 +235,7 @@ void HBSetup::save_params_callback() {
   {
     CountryCodeType cc{wifi_country_param.getValue()};
     cc.to_upper_case();
+    app_.info("params page submitted wifi_cc='%s'", cc.c_str());
     app_.device_state_.set_wifi_country(cc);
   }
   {

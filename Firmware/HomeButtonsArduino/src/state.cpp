@@ -30,7 +30,15 @@ void DeviceState::save_user() {
   preferences_.putString("endpoint", user_preferences_.endpoint_url.c_str());
   preferences_.putString("auth_tok", user_preferences_.auth_token.c_str());
   preferences_.putString("rst_spec", user_preferences_.reset_spec.c_str());
-  preferences_.putString("wifi_cc", user_preferences_.wifi_country.c_str());
+  {
+    const size_t n = preferences_.putString(
+        "wifi_cc", user_preferences_.wifi_country.c_str());
+    // Written and read back on every save. NVS putString fails silently
+    // when the namespace is full, and a setting that quietly does not
+    // persist is hard to tell from one that was never entered.
+    info("save wifi_cc='%s' (%u bytes)", user_preferences_.wifi_country.c_str(),
+         static_cast<unsigned>(n));
+  }
   preferences_.end();
 }
 
@@ -69,6 +77,7 @@ void DeviceState::load_user() {
                          RESET_SPEC_DFLT);
   _load_to_static_string(user_preferences_.wifi_country, "wifi_cc",
                          WIFI_COUNTRY_DFLT);
+  info("load wifi_cc='%s'", user_preferences_.wifi_country.c_str());
 
   preferences_.end();
 }
