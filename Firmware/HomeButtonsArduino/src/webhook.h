@@ -44,10 +44,22 @@ class Webhook : public Logger {
   // Posts battery level only, used by the timer wake.
   bool send_heartbeat();
 
+  // Posts the cleared counters after a scheduled reset.
+  bool send_reset(const char* mode);
+
+  // Asks for nothing and reports nothing - exists purely so the response
+  // can carry the clock. The receiver's press branch ignores it. Used at
+  // first connect, and whenever the clock is too old to trust near a reset
+  // boundary.
+  bool sync_time();
+
  private:
   bool _post(char* body, size_t len);
   size_t _build_body(char* out, size_t out_size, const Event& event,
-                     bool heartbeat);
+                     const char* event_kind, const char* reset_mode);
+  // Reads `ts` and `tz_offset` out of a response and sets the system clock.
+  // Every response carries them, so any request doubles as a clock sync.
+  void _apply_time(const String& response);
 
   DeviceState& device_state_;
   WiFiClientSecure client_;

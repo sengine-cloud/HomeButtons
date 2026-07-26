@@ -61,6 +61,20 @@ static constexpr int32_t COUNTER_MIN = 0;
 static constexpr int32_t COUNTER_MAX = 999999;
 static constexpr char COUNTER_NAMES[NUM_COUNTERS][2] = {"a", "b"};
 
+// ------ counter reset ------
+// One free-text portal field covers every mode:
+//     off | daily 03:00 | weekly mon 03:00 | monthly 1 03:00
+static constexpr size_t RESET_SPEC_MAXLEN = 24;
+static constexpr char RESET_SPEC_DFLT[] = "daily 03:00";
+// The device has no trustworthy clock of its own; it is set from the `ts`
+// and `tz_offset` the webhook returns. If the last successful sync is
+// older than this, skip the reset rather than act on a drifting clock -
+// the internal RC oscillator is good for hours, not weeks.
+static constexpr uint32_t CLOCK_STALE_SECONDS = 48UL * 60UL * 60UL;
+// Resync opportunistically when a connection is up anyway and the clock is
+// older than this, so a boundary is never approached on a stale clock.
+static constexpr uint32_t CLOCK_RESYNC_SECONDS = 6UL * 60UL * 60UL;
+
 // ------ webhook ------
 static constexpr size_t ENDPOINT_URL_MAXLEN = 128;
 static constexpr size_t AUTH_TOKEN_MAXLEN = 128;

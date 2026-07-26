@@ -41,6 +41,8 @@ class DeviceState : public Logger {
 
     EndpointUrlType endpoint_url;
     AuthTokenType auth_token;
+    // When the counters clear themselves. See reset_schedule.h.
+    ResetSpecType reset_spec;
   } user_preferences_;
 
   struct Persisted {
@@ -56,6 +58,17 @@ class DeviceState : public Logger {
     // Monotonic per-device sequence number, used by the receiver to dedupe
     // retries so a replayed press does not notify twice.
     uint32_t seq = 0;
+
+    // Which reset period the current counts belong to, as produced by
+    // reset_schedule::period_of(). 0 means "not yet established", which
+    // suppresses the first reset so a fresh device does not clear counts
+    // it has only just been told about.
+    int32_t last_reset_period = 0;
+    // Seconds to add to UTC for local time, as reported by the webhook.
+    // Persisted so local time is known on wake, before any request.
+    int32_t tz_offset = 0;
+    // UTC epoch of the last successful clock sync; 0 means never.
+    uint32_t last_time_sync = 0;
 
     // Flags
     bool wifi_quick_connect = false;
@@ -143,6 +156,38 @@ class DeviceState : public Logger {
   }
   void set_auth_token(const AuthTokenType& token) {
     user_preferences_.auth_token = token;
+  }
+
+  const ResetSpecType& reset_spec() const {
+    return user_preferences_.reset_spec;
+  }
+  void set_reset_spec(const ResetSpecType& spec) {
+    user_preferences_.reset_spec = spec;
+  }
+
+  // Clock -------------------------------------------------------------
+  int32_t tz_offset() const { return persisted_.tz_offset; }
+  uint32_t last_time_sync() const { return persisted_.last_time_sync; }
+  bool clock_valid() const { return persisted_.last_time_sync > 0; }
+
+  void set_clock_synced(uint32_t utc_epoch, int32_t tz_offset) {
+    persisted_.last_time_sync = utc_epoch;
+    persisted_.tz_offset = tz_offset;
+  }
+
+  int32_t last_reset_period() const { return persisted_.last_reset_period; }
+  void set_last_reset_period(int32_t period) {
+    persisted_.last_reset_period = period;
+  }
+
+  // Zeroes every counter. Returns true if anything actually changed.
+  bool clear_counters() {
+    bool changed = false;
+    for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+      if (persisted_.counters[i] != 0) changed = true;
+      persisted_.counters[i] = 0;
+    }
+    return changed;
   }
 
   // Counters -----------------------------------------------------------

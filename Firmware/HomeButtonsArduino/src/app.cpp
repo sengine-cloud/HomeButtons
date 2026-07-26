@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
+#include <time.h>
 #include "esp_ota_ops.h"
 
 #include "config.h"
@@ -69,6 +70,7 @@ void App::_start_esp_sleep() {
 }
 
 void App::_go_to_sleep() {
+  _schedule_next_wake();
   device_state_.save_all();
   hw_.set_all_leds(0);
   _start_esp_sleep();
@@ -243,8 +245,72 @@ void App::_refresh_counter_labels() {
   }
 }
 
+reset_schedule::Spec App::_reset_spec() {
+  return reset_schedule::parse(device_state_.reset_spec().c_str(), *this);
+}
+
+bool App::_clock_fresh() const {
+  if (!device_state_.clock_valid()) return false;
+  const time_t now = time(nullptr);
+  const time_t synced = static_cast<time_t>(device_state_.last_time_sync());
+  // Drift on the internal RC oscillator is fine for hours and meaningless
+  // after days, so refuse to act on a clock that old.
+  return now >= synced &&
+         (now - synced) <= static_cast<time_t>(CLOCK_STALE_SECONDS);
+}
+
+void App::_check_reset() {
+  if (!_clock_fresh()) return;
+
+  const reset_schedule::Spec spec = _reset_spec();
+  if (spec.mode == reset_schedule::Mode::kOff) return;
+
+  const time_t local =
+      time(nullptr) + static_cast<time_t>(device_state_.tz_offset());
+  const int32_t period = reset_schedule::period_of(spec, local);
+  const int32_t last = device_state_.last_reset_period();
+
+  if (last == 0) {
+    // First time the date has ever been known. Adopt the period without
+    // clearing, so setting up a device does not wipe a count it was just
+    // given.
+    device_state_.set_last_reset_period(period);
+    return;
+  }
+  if (period == last) return;
+
+  const bool had_counts = device_state_.clear_counters();
+  device_state_.set_last_reset_period(period);
+  _refresh_counter_labels();
+  device_state_.flags().display_redraw = true;
+  reset_to_report_ = true;
+  info("reset boundary crossed (%s, period %d -> %d), counters cleared%s",
+       reset_schedule::mode_name(spec.mode), last, period,
+       had_counts ? "" : " (already zero)");
+}
+
+void App::_schedule_next_wake() {
+  device_state_.flags().schedule_wakeup_time = 0;
+  if (!device_state_.clock_valid()) return;
+
+  const reset_schedule::Spec spec = _reset_spec();
+  if (spec.mode == reset_schedule::Mode::kOff) return;
+
+  const time_t local =
+      time(nullptr) + static_cast<time_t>(device_state_.tz_offset());
+  const uint32_t secs = reset_schedule::seconds_until_next(spec, local);
+  device_state_.flags().schedule_wakeup_time = secs;
+  info("next reset wake in %u s (%s)", secs,
+       reset_schedule::mode_name(spec.mode));
+}
+
 // Runs on the UI task. RAM only: no NVS write, no HTTP.
 void App::_handle_counter_press(uint8_t btn_id) {
+  // Before anything else: a press just after a boundary belongs to the new
+  // period, not the one that ended. The clock survives deep sleep, so this
+  // is knowable without the network.
+  _check_reset();
+
   uint8_t idx = 0;
   int32_t delta = 0;
   if (!_btn_to_counter(btn_id, idx, delta)) {
@@ -327,8 +393,29 @@ void App::_flush_pending() {
 void App::_net_on_connect() {
   webhook_.begin();
 
+  const bool have_presses =
+      press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
+  const time_t now = time(nullptr);
+  const bool clock_old =
+      !device_state_.clock_valid() ||
+      (now - static_cast<time_t>(device_state_.last_time_sync())) >
+          static_cast<time_t>(CLOCK_RESYNC_SECONDS);
+
   if (boot_cause_ == BootCause::TIMER) {
     webhook_.send_heartbeat();
+  } else if (!have_presses && clock_old) {
+    // Every response carries the clock, so a bare sync is only worth
+    // sending when nothing else is going out anyway.
+    webhook_.sync_time();
+  }
+
+  // The clock may only just have become valid, so re-test the boundary now
+  // that it has.
+  _check_reset();
+  if (reset_to_report_) {
+    if (webhook_.send_reset(reset_schedule::mode_name(_reset_spec().mode))) {
+      reset_to_report_ = false;
+    }
   }
 }
 
@@ -465,6 +552,10 @@ void App::_main_task() {
 
   device_state_.sensors().battery_pct = hw_.read_battery_percent();
   device_state_.sensors().battery_voltage = hw_.read_battery_voltage();
+
+  // The clock survives deep sleep, so the boundary can be tested before the
+  // network is up - which matters when the reset wake is what woke us.
+  _check_reset();
 
   // Labels carry the running totals, so make them match the counters
   // restored from NVS before anything is drawn.

@@ -28,6 +28,7 @@ void DeviceState::save_user() {
       ip_address_to_static_string(user_preferences_.network.dns2).c_str());
   preferences_.putString("endpoint", user_preferences_.endpoint_url.c_str());
   preferences_.putString("auth_tok", user_preferences_.auth_token.c_str());
+  preferences_.putString("rst_spec", user_preferences_.reset_spec.c_str());
   preferences_.end();
 }
 
@@ -61,6 +62,8 @@ void DeviceState::load_user() {
 
   _load_to_static_string(user_preferences_.endpoint_url, "endpoint", "");
   _load_to_static_string(user_preferences_.auth_token, "auth_tok", "");
+  _load_to_static_string(user_preferences_.reset_spec, "rst_spec",
+                         RESET_SPEC_DFLT);
 
   preferences_.end();
 }
@@ -92,6 +95,9 @@ void DeviceState::save_persisted() {
                         persisted_.counters[i]);
   }
   preferences_.putUInt("seq", persisted_.seq);
+  preferences_.putInt("rst_per", persisted_.last_reset_period);
+  preferences_.putInt("tz_off", persisted_.tz_offset);
+  preferences_.putUInt("last_sync", persisted_.last_time_sync);
   preferences_.putBool("wifi_qc", persisted_.wifi_quick_connect);
   preferences_.putBool("chg_cpt_shwn", persisted_.charge_complete_showing);
   preferences_.putBool("u_msg_shwn", persisted_.user_msg_showing);
@@ -117,6 +123,9 @@ void DeviceState::load_persisted() {
         preferences_.getInt(StaticString<8>("cnt_%d", i).c_str(), 0);
   }
   persisted_.seq = preferences_.getUInt("seq", 0);
+  persisted_.last_reset_period = preferences_.getInt("rst_per", 0);
+  persisted_.tz_offset = preferences_.getInt("tz_off", 0);
+  persisted_.last_time_sync = preferences_.getUInt("last_sync", 0);
   persisted_.wifi_quick_connect = preferences_.getBool("wifi_qc", false);
   persisted_.charge_complete_showing =
       preferences_.getBool("chg_cpt_shwn", false);

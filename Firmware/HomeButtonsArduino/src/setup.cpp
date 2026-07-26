@@ -28,6 +28,10 @@ static WiFiManagerParameter auth_token_param("auth_token", "Auth Token", "",
 // Drains the battery quickly - leave it off for normal use.
 static WiFiManagerParameter awake_mode_param(
     "awake_mode", "Awake Mode (debug, drains battery) - 1 or 0", "", 1);
+// off | daily 03:00 | weekly mon 03:00 | monthly 1 03:00
+static WiFiManagerParameter reset_spec_param(
+    "reset_spec", "Counter Reset (e.g. daily 03:00, weekly mon 03:00, off)",
+    "", RESET_SPEC_MAXLEN);
 static WiFiManagerParameter static_ip_param("static_ip", "Static IP", "", 15);
 static WiFiManagerParameter gateway_param("gateway", "Gateway", "", 15);
 static WiFiManagerParameter subnet_param("subnet", "Subnet Mask", "", 15);
@@ -182,6 +186,14 @@ void HBSetup::save_params_callback() {
       EndpointUrlType{endpoint_url_param.getValue()});
   app_.device_state_.set_auth_token(AuthTokenType{auth_token_param.getValue()});
   {
+    // Normalised through the parser so whatever lands in NVS is canonical
+    // and a typo cannot silently disable the reset.
+    const ResetSpecType entered{reset_spec_param.getValue()};
+    const auto spec = reset_schedule::parse(
+        entered.empty() ? RESET_SPEC_DFLT : entered.c_str(), app_);
+    app_.device_state_.set_reset_spec(reset_schedule::format(spec));
+  }
+  {
     const char* v = awake_mode_param.getValue();
     app_.device_state_.persisted().user_awake_mode =
         (v != nullptr && (v[0] == '1' || v[0] == 'y' || v[0] == 'Y'));
@@ -225,6 +237,8 @@ void HBSetup::start_setup() {
                             AUTH_TOKEN_MAXLEN);
   awake_mode_param.setValue(
       app_.device_state_.persisted().user_awake_mode ? "1" : "0", 1);
+  reset_spec_param.setValue(app_.device_state_.reset_spec().c_str(),
+                            RESET_SPEC_MAXLEN);
   static_ip_param.setValue(app_.device_state_.user_preferences()
                                .network.static_ip.toString()
                                .c_str(),
@@ -250,6 +264,7 @@ void HBSetup::start_setup() {
   wifi_manager.addParameter(&endpoint_url_param);
   wifi_manager.addParameter(&auth_token_param);
   wifi_manager.addParameter(&awake_mode_param);
+  wifi_manager.addParameter(&reset_spec_param);
   wifi_manager.addParameter(&static_ip_param);
   wifi_manager.addParameter(&gateway_param);
   wifi_manager.addParameter(&subnet_param);

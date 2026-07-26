@@ -11,6 +11,7 @@
 #include "logger.h"
 #include "hardware.h"
 #include "setup.h"
+#include "reset_schedule.h"
 #include "display/display.h"
 #include "button_ui/btn_sw_led.h"
 
@@ -213,6 +214,16 @@ class App : public AppStateMachine, public Logger {
   // Applies the press locally (counter, label, redraw) and either sends it
   // straight away or queues it until the network is up.
   void _handle_counter_press(uint8_t btn_id);
+  // Clears the counters when the configured reset boundary has been
+  // crossed. RAM only, so it is safe to call from the UI task: persistence
+  // rides along with the next save_all(). The clock survives deep sleep, so
+  // this can run before the network is up - and must, so that a press just
+  // after the boundary counts toward the new period rather than the old.
+  void _check_reset();
+  reset_schedule::Spec _reset_spec();
+  bool _clock_fresh() const;
+  // Seconds until the next boundary, into flags().schedule_wakeup_time.
+  void _schedule_next_wake();
   void _refresh_counter_labels();
   void _flush_pending();
 
@@ -260,6 +271,11 @@ class App : public AppStateMachine, public Logger {
   // Set if any press in the current burst failed, so the button can end on
   // the error pattern rather than simply going dark.
   std::array<std::atomic<bool>, NUM_BUTTONS> send_failed_{};
+
+  // Set when _check_reset() clears the counters, so the following connect
+  // reports it. RAM only: if the report is lost, the next press carries
+  // absolute counts and the receiver self-heals.
+  bool reset_to_report_ = false;
 
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;
