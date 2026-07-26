@@ -59,6 +59,13 @@ jobs:
       # interchangeable: original_debug routes the console to USB CDC and
       # uses QIO flash mode, so it has its own bootloader.bin as well as its
       # own firmware.bin.
+      # Host-side tests for the pure-logic modules. Runs before the firmware
+      # build because it is seconds rather than minutes, and a calendar bug
+      # here would otherwise only show up on a device weeks later.
+      - name: Unit tests
+        working-directory: Firmware/HomeButtonsArduino
+        run: pio test -e native
+
       - name: Build firmware
         working-directory: Firmware/HomeButtonsArduino
         run: pio run -e original_release -e original_debug
