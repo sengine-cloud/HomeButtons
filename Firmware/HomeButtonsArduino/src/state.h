@@ -45,6 +45,8 @@ class DeviceState : public Logger {
     AuthTokenType auth_token;
     // When the counters clear themselves. See reset_schedule.h.
     ResetSpecType reset_spec;
+    // ISO country code for the Wi-Fi regulatory domain. See config.h.
+    CountryCodeType wifi_country;
   } user_preferences_;
 
   struct Persisted {
@@ -182,6 +184,13 @@ class DeviceState : public Logger {
   }
   void set_auth_token(const AuthTokenType& token) {
     user_preferences_.auth_token = token;
+  }
+
+  const CountryCodeType& wifi_country() const {
+    return user_preferences_.wifi_country;
+  }
+  void set_wifi_country(const CountryCodeType& cc) {
+    user_preferences_.wifi_country = cc;
   }
 
   const ResetSpecType& reset_spec() const {

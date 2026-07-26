@@ -30,6 +30,7 @@ void DeviceState::save_user() {
   preferences_.putString("endpoint", user_preferences_.endpoint_url.c_str());
   preferences_.putString("auth_tok", user_preferences_.auth_token.c_str());
   preferences_.putString("rst_spec", user_preferences_.reset_spec.c_str());
+  preferences_.putString("wifi_cc", user_preferences_.wifi_country.c_str());
   preferences_.end();
 }
 
@@ -66,6 +67,8 @@ void DeviceState::load_user() {
   _load_to_static_string(user_preferences_.auth_token, "auth_tok", "");
   _load_to_static_string(user_preferences_.reset_spec, "rst_spec",
                          RESET_SPEC_DFLT);
+  _load_to_static_string(user_preferences_.wifi_country, "wifi_cc",
+                         WIFI_COUNTRY_DFLT);
 
   preferences_.end();
 }

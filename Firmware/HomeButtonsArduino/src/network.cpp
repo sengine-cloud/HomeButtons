@@ -1,5 +1,6 @@
 #include "network.h"
 #include <esp_wifi.h>
+#include <string.h>
 #include "config.h"
 #include "state.h"
 #include "utils.h"
@@ -29,6 +30,7 @@ void NetworkSMStates::QuickConnectState::entry() {
   sm()._pre_wifi_connect();
   sm().info("connecting Wi-Fi (quick mode)...");
   WiFi.mode(WIFI_STA);
+  apply_wifi_country(sm().device_state_.wifi_country().c_str(), sm());
   WiFi.persistent(true);
   start_time_ = millis();
   WiFi.begin();
@@ -54,6 +56,7 @@ void NetworkSMStates::QuickConnectState::loop() {
 void NetworkSMStates::NormalConnectState::entry() {
   sm()._pre_wifi_connect();
   WiFi.mode(WIFI_STA);
+  apply_wifi_country(sm().device_state_.wifi_country().c_str(), sm());
   WiFi.persistent(true);
 
   // get ssid from esp32 saved config
@@ -198,6 +201,27 @@ void Network::_pre_wifi_connect() {
                 static_ip_config.dns2);
   } else {
     info("Using DHCP. Static IP not set or not valid.");
+  }
+}
+
+void apply_wifi_country(const char *country_code, const Logger &log) {
+  if (country_code == nullptr || country_code[0] == '\0') {
+    log.debug("no Wi-Fi country set, leaving the ESP-IDF default");
+    return;
+  }
+  // ieee80211d_enabled = false: use the configured country always. With it
+  // enabled the device adopts the AP's country and reverts on disconnect,
+  // which is the default and is why channels 12-13 can stay invisible.
+  const esp_err_t err = esp_wifi_set_country_code(country_code, false);
+  if (err != ESP_OK) {
+    log.warning("Wi-Fi country '%s' rejected (%d) - check it is one of the "
+                "codes ESP-IDF supports",
+                country_code, static_cast<int>(err));
+    return;
+  }
+  char applied[4] = {};
+  if (esp_wifi_get_country_code(applied) == ESP_OK) {
+    log.info("Wi-Fi country set to %s", applied);
   }
 }
 

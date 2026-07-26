@@ -71,6 +71,24 @@ static constexpr int32_t COUNTER_MIN = 0;
 static constexpr int32_t COUNTER_MAX = 999999;
 static constexpr char COUNTER_NAMES[NUM_COUNTERS][2] = {"a", "b"};
 
+// ------ wifi ------
+// ISO country code controlling which channels may be scanned and used.
+// Empty leaves the ESP-IDF default, which is "CN" with 802.11d ENABLED -
+// meaning the device defers to whatever country the AP advertises and
+// reverts on disconnect. That is why a router that auto-hops to channel 12
+// or 13 can vanish from the scan list entirely: the device never gets to
+// hear the beacon that would have told it those channels are allowed.
+//
+// Setting this applies the country with 802.11d disabled, so the range is
+// fixed and channels 12-13 stay visible on European codes.
+//
+// Supported: 01 (world) AT AU BE BG BR CA CH CN CY CZ DE DK EE ES FI FR GB
+// GR HK HR HU IE IN IS IT JP KR LI LT LU LV MT MX NL NO NZ PL PT RO SE SI
+// SK TW US. Note UA is not supported by ESP-IDF - use PL or another
+// neighbouring EU code, which give the same 1-13 range.
+static constexpr size_t WIFI_COUNTRY_MAXLEN = 2;
+static constexpr char WIFI_COUNTRY_DFLT[] = "";
+
 // ------ counter reset ------
 // One free-text portal field covers every mode:
 //     off | daily 03:00 | weekly mon 03:00 | monthly 1 03:00

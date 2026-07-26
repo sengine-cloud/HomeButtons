@@ -140,4 +140,15 @@ class Network : public NetworkStateMachine, public Logger {
 
 StaticIPConfig validate_static_ip_config(StaticIPConfig config);
 
+// Pins the Wi-Fi regulatory domain, with 802.11d disabled so the configured
+// range is used always rather than being taken from the AP and reverted on
+// disconnect. Must be called after WiFi.mode() - the driver has to be
+// initialised - and before any scan or connect.
+//
+// Both the setup portal's scan and the normal connect path need this: a
+// router on channel 12 or 13 is invisible to a scan that does not know
+// those channels are permitted, which looks exactly like the network having
+// disappeared.
+void apply_wifi_country(const char *country_code, const Logger &log);
+
 #endif  // HOMEBUTTONS_NETWORK_H

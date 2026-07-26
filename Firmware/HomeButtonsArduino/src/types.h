@@ -20,6 +20,7 @@ using EndpointUrlType = StaticString<ENDPOINT_URL_MAXLEN>;
 using AuthTokenType = StaticString<AUTH_TOKEN_MAXLEN>;
 using ResetSpecType = StaticString<RESET_SPEC_MAXLEN>;
 using BuildIdType = StaticString<BUILD_ID_MAXLEN>;
+using CountryCodeType = StaticString<WIFI_COUNTRY_MAXLEN>;
 using PayloadType = StaticString<HTTP_PAYLOAD_SIZE>;
 
 using SSIDType = StaticString<32>;

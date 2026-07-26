@@ -32,6 +32,13 @@ static WiFiManagerParameter awake_mode_param(
 static WiFiManagerParameter reset_spec_param(
     "reset_spec", "Counter Reset (e.g. daily 03:00, weekly mon 03:00, off)",
     "", RESET_SPEC_MAXLEN);
+// Blank leaves the ESP-IDF default, which defers to the AP's advertised
+// country and reverts on disconnect - the reason a router on channel 12 or
+// 13 can be missing from the scan list entirely. UA is not among the codes
+// ESP-IDF accepts; PL gives the same 1-13 range.
+static WiFiManagerParameter wifi_country_param(
+    "wifi_cc", "Wi-Fi Country (e.g. PL, DE, GB, US; blank = default)", "",
+    WIFI_COUNTRY_MAXLEN);
 static WiFiManagerParameter static_ip_param("static_ip", "Static IP", "", 15);
 static WiFiManagerParameter gateway_param("gateway", "Gateway", "", 15);
 static WiFiManagerParameter subnet_param("subnet", "Subnet Mask", "", 15);
@@ -89,6 +96,10 @@ void HBSetup::start_wifi_setup() {
 #endif
 
   WiFi.mode(WIFI_STA);
+  // Before the portal scans: without this the scan uses the ESP-IDF default
+  // regulatory domain and a network on channel 12 or 13 simply does not
+  // appear, which reads as the network being gone rather than unscannable.
+  apply_wifi_country(app_.device_state_.wifi_country().c_str(), app_);
   wifi_manager.setTitle(app_.device_state_.get_model_name_w_rand_id().c_str());
   wifi_manager.setBreakAfterConfig(true);
   wifi_manager.setDarkMode(true);
@@ -133,6 +144,7 @@ void HBSetup::start_wifi_setup() {
 
   bool wifi_connected = false;
   WiFi.mode(WIFI_STA);
+  apply_wifi_country(app_.device_state_.wifi_country().c_str(), app_);
   uint32_t wifi_start_time = millis();
   WiFi.begin();
   while (true) {
@@ -185,6 +197,11 @@ void HBSetup::save_params_callback() {
   app_.device_state_.set_endpoint_url(
       EndpointUrlType{endpoint_url_param.getValue()});
   app_.device_state_.set_auth_token(AuthTokenType{auth_token_param.getValue()});
+  {
+    CountryCodeType cc{wifi_country_param.getValue()};
+    cc.to_upper_case();
+    app_.device_state_.set_wifi_country(cc);
+  }
   {
     // Normalised through the parser so whatever lands in NVS is canonical
     // and a typo cannot silently disable the reset.
@@ -246,6 +263,8 @@ void HBSetup::start_setup() {
       app_.device_state_.persisted().user_awake_mode ? "1" : "0", 1);
   reset_spec_param.setValue(app_.device_state_.reset_spec().c_str(),
                             RESET_SPEC_MAXLEN);
+  wifi_country_param.setValue(app_.device_state_.wifi_country().c_str(),
+                              WIFI_COUNTRY_MAXLEN);
   static_ip_param.setValue(app_.device_state_.user_preferences()
                                .network.static_ip.toString()
                                .c_str(),
@@ -272,6 +291,7 @@ void HBSetup::start_setup() {
   wifi_manager.addParameter(&auth_token_param);
   wifi_manager.addParameter(&awake_mode_param);
   wifi_manager.addParameter(&reset_spec_param);
+  wifi_manager.addParameter(&wifi_country_param);
   wifi_manager.addParameter(&static_ip_param);
   wifi_manager.addParameter(&gateway_param);
   wifi_manager.addParameter(&subnet_param);

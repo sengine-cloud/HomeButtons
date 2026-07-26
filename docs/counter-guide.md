@@ -77,6 +77,7 @@ The portal opens at `http://192.168.4.1` and closes after 10 minutes.
 | **Device Name** | Cosmetic; shown on the settings screen |
 | **Webhook URL** | Full HTTPS URL of the n8n **production** webhook. Max 128 chars |
 | **Auth Token** | Sent as `Authorization: Bearer <token>`. Max 128 chars. Masked in the page |
+| **Wi-Fi Country** | ISO code, e.g. `PL`, `DE`, `GB`, `US`. Blank uses the ESP-IDF default. **Set this if your router uses channel 12 or 13** — see below |
 | **Awake Mode** | `1` keeps the device from deep sleeping — needed to hold a USB serial console open. `0` for normal use. Drains the battery fast |
 | Static IP / Gateway / Subnet / DNS / DNS 2 | Optional — leave blank for DHCP. All three of IP, gateway and subnet must be set for static to apply |
 | Button 1-6 Label | See below |
@@ -226,6 +227,7 @@ Serial at 115200 baud shows the whole flow (`pio device monitor`).
 | Two Telegram messages for one press | `seq` dedupe not implemented in the workflow |
 | `Check connection!` on screen | Five consecutive failed timer-wake connections |
 | Device never sleeps | It is on USB power, so it stays in awake mode |
+| **Your network is missing from the setup scan list** | Router is on channel 12 or 13. The ESP-IDF default defers to the AP's advertised country and reverts on disconnect, so those channels are never scanned. Set **Wi-Fi Country** to a code whose range covers them (any EU code gives 1-13). `UA` is not supported by ESP-IDF — use `PL`. Also check the network is 2.4 GHz and not hidden |
 | Placeholder glyph instead of an icon | Icon not in the SPIFFS image — only `plus` and `minus` ship. Re-run `tools/make_icons.py` and `-t uploadfs` |
 
 ## 8. Reading logs
