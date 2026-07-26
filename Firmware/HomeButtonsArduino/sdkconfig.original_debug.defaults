@@ -10,21 +10,29 @@ CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
 
-# Route the console to USB CDC so logs come out of the USB-C connector
-# instead of the TX/RX pins on the CMSIS-DAP header.
+# DO NOT set CONFIG_ESP_CONSOLE_USB_CDC=y here. It hangs the device.
 #
-# Debug build only. Release stays on UART0 deliberately: UART works from
-# the first ROM bootloader byte, survives deep sleep, and lets the device
-# run on battery while you read logs. USB CDC does none of those, and the
-# release build is the one that runs untethered.
+# esp_system/Kconfig declares:
+#     config ESP_CONSOLE_USB_CDC
+#         depends on (IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3) && !TINY_USB
+# with the comment "the ROM CDC driver is currently incompatible with
+# TinyUSB". This project builds framework = arduino, espidf, and Arduino
+# pulls TinyUSB in (CONFIG_TINYUSB_CDC_ENABLED=y), so that dependency
+# cannot be satisfied here.
 #
-# Caveats that apply here:
-#   - The port only exists after USB enumeration, so bootloader and early
-#     IDF output is still lost. Anything boot-related needs the UART pins.
-#   - Deep sleep tears the USB device down; the port disappears and
-#     re-enumerates on every wake. Turn on Awake Mode in the setup portal
-#     while debugging to keep the device up and the port stable.
-#   - ESP32-S2 has no USB_SERIAL_JTAG peripheral, so this goes through the
-#     USB OTG controller and TinyUSB, not a dedicated console block.
-CONFIG_ESP_CONSOLE_UART_DEFAULT=n
-CONFIG_ESP_CONSOLE_USB_CDC=y
+# Forcing the symbol from a defaults file overrides the unmet dependency
+# instead of failing: the build succeeds and the symbol really is set in
+# the generated sdkconfig, so it looks verified. On the device the ROM CDC
+# console and TinyUSB then both drive the same USB OTG peripheral. It
+# hangs at boot and enumerates as 303a:0002 without answering esptool,
+# and has to be recovered by holding BOOT, tapping RST, and flashing with
+# `--before no_reset`.
+#
+# The console therefore stays on UART0 for both builds - read it from TX
+# and GND on the CMSIS-DAP header.
+#
+# If USB logging is wanted, the supported route on this project is
+# Arduino's own stack rather than the IDF console: build with
+# -DARDUINO_USB_CDC_ON_BOOT=1 and call Serial.setDebugOutput(true) early
+# so esp_log output is redirected into Arduino's TinyUSB CDC, leaving one
+# owner of the peripheral. Untested on hardware here.
