@@ -20,6 +20,13 @@ static constexpr uint16_t max_palette_pixels = 256;
 static constexpr uint16_t MDI_SIZE_LARGE = 64;
 static constexpr uint16_t MDI_SIZE_SMALL = 48;
 
+// Top edge of a full-size icon, per button row. Both columns of a row share
+// one value, so icons line up across the display. Text labels deliberately
+// do not use these - they are placed per button index, which staggers the
+// two columns - but a counter total is drawn as though it were an icon so
+// the numbers sit level with each other and with icons in the other rows.
+static constexpr uint16_t MDI_ROW_TOP_Y[3] = {17, 116, 215};
+
 struct HardwareDefinition;
 
 class DeviceState;

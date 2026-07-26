@@ -394,28 +394,15 @@ void Display::draw_main() {
 
       // calculate icon position on display
       uint16_t x = i % 2 == 0 ? 0 : WIDTH - size;
+      // A shrunken icon centres on its own button, a full-size one sits at
+      // the shared row top so both columns line up. Upstream spelled this
+      // out as three identical if/else pairs on i.
       uint16_t y;
-      if (i < 2) {
-        if (small) {
-          y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) -
-              size / 2;
-        } else {
-          y = 17;
-        }
-      } else if (i < 4) {
-        if (small) {
-          y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) -
-              size / 2;
-        } else {
-          y = 116;
-        }
+      if (small) {
+        y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) -
+            size / 2;
       } else {
-        if (small) {
-          y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) -
-              size / 2;
-        } else {
-          y = 215;
-        }
+        y = MDI_ROW_TOP_Y[i / 2];
       }
       draw_mdi(icon.c_str(), size, x, y);
     } else if (label_type[i] == LabelType::Mixed) {
@@ -486,12 +473,26 @@ void Display::draw_main() {
       }
       h = u8g2.getFontAscent();
       int16_t x, y;
-      if (i % 2 == 0) {
+      if (numeric) {
+        // Placed exactly where a full-size icon would sit: one vertical
+        // centre per row shared by both columns, and centred within the
+        // column. Text's own placement is per button index, which puts the
+        // left column high and the right column low - fine for a caption,
+        // wrong for two counters meant to read as a pair.
+        const uint16_t cy = MDI_ROW_TOP_Y[i / 2] + MDI_SIZE_LARGE / 2;
+        const uint16_t cx =
+            (i % 2 == 0) ? MDI_SIZE_LARGE / 2 : WIDTH - MDI_SIZE_LARGE / 2;
+        x = static_cast<int16_t>(cx) - w / 2;
+        y = static_cast<int16_t>(cy) + h / 2;
+      } else if (i % 2 == 0) {
         x = h_padding;
+        y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) +
+            h / 2;
       } else {
         x = WIDTH - w - h_padding;
+        y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) +
+            h / 2;
       }
-      y = static_cast<uint16_t>(round(HEIGHT / 12. + i * HEIGHT / 6.)) + h / 2;
       u8g2.setCursor(x, y);
       u8g2.print(label.c_str());
     }
