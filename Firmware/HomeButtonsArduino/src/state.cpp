@@ -36,7 +36,9 @@ void DeviceState::save_user() {
     // Written and read back on every save. NVS putString fails silently
     // when the namespace is full, and a setting that quietly does not
     // persist is hard to tell from one that was never entered.
-    info("save wifi_cc='%s' (%u bytes)", user_preferences_.wifi_country.c_str(),
+    // putString returns strlen(), so 0 is normal for an empty value and
+    // says nothing about whether the write succeeded.
+    info("save wifi_cc='%s' (wrote %u)", user_preferences_.wifi_country.c_str(),
          static_cast<unsigned>(n));
   }
   preferences_.end();
