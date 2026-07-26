@@ -129,6 +129,7 @@ class Network : public NetworkStateMachine, public Logger {
   std::function<void()> on_connect_callback_;
 
   void _pre_wifi_connect();
+  void info_log_connected(const arduino_event_info_t &ev);
 
   friend class NetworkSMStates::IdleState;
   friend class NetworkSMStates::QuickConnectState;

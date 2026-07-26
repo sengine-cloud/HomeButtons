@@ -175,7 +175,58 @@ void Network::disconnect(bool erase) {
 
 void Network::update() { loop(); }
 
-void Network::setup() { network_task_handle_ = xTaskGetCurrentTaskHandle(); }
+// The driver's own reason code is the one fact that separates "cannot see
+// the AP" from "the AP refused us" from "wrong key". Without it a failed
+// association is just a 20s timeout, which looks identical in every case.
+static const char *disconnect_reason_name(uint8_t reason) {
+  switch (reason) {
+    case WIFI_REASON_AUTH_EXPIRE:          return "AUTH_EXPIRE";
+    case WIFI_REASON_AUTH_LEAVE:           return "AUTH_LEAVE";
+    case WIFI_REASON_ASSOC_EXPIRE:         return "ASSOC_EXPIRE";
+    case WIFI_REASON_ASSOC_TOOMANY:        return "ASSOC_TOOMANY (AP full)";
+    case WIFI_REASON_NOT_AUTHED:           return "NOT_AUTHED";
+    case WIFI_REASON_NOT_ASSOCED:          return "NOT_ASSOCED";
+    case WIFI_REASON_ASSOC_LEAVE:          return "ASSOC_LEAVE";
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+      return "4WAY_HANDSHAKE_TIMEOUT (wrong key, or PMF mismatch)";
+    case WIFI_REASON_IE_IN_4WAY_DIFFERS:   return "IE_IN_4WAY_DIFFERS";
+    case WIFI_REASON_GROUP_KEY_UPDATE_TIMEOUT:
+      return "GROUP_KEY_UPDATE_TIMEOUT";
+    case WIFI_REASON_INVALID_RSN_IE_CAP:   return "INVALID_RSN_IE_CAP";
+    case WIFI_REASON_802_1X_AUTH_FAILED:   return "802_1X_AUTH_FAILED";
+    case WIFI_REASON_BEACON_TIMEOUT:       return "BEACON_TIMEOUT (out of range)";
+    case WIFI_REASON_NO_AP_FOUND:
+      return "NO_AP_FOUND (not seen in scan - channel, band or hidden)";
+    case WIFI_REASON_AUTH_FAIL:            return "AUTH_FAIL (wrong password)";
+    case WIFI_REASON_ASSOC_FAIL:           return "ASSOC_FAIL (AP refused)";
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:    return "HANDSHAKE_TIMEOUT";
+    case WIFI_REASON_CONNECTION_FAIL:      return "CONNECTION_FAIL";
+    default:                               return "see esp_wifi_types.h";
+  }
+}
+
+void Network::setup() {
+  network_task_handle_ = xTaskGetCurrentTaskHandle();
+
+  WiFi.onEvent(
+      [this](arduino_event_id_t, arduino_event_info_t info) {
+        const uint8_t reason = info.wifi_sta_disconnected.reason;
+        warning("Wi-Fi disconnected: reason %u (%s)", reason,
+                disconnect_reason_name(reason));
+      },
+      ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+
+  WiFi.onEvent(
+      [this](arduino_event_id_t, arduino_event_info_t info) {
+        info_log_connected(info);
+      },
+      ARDUINO_EVENT_WIFI_STA_CONNECTED);
+}
+
+void Network::info_log_connected(const arduino_event_info_t &ev) {
+  info("associated: ch %u, RSSI %d", ev.wifi_sta_connected.channel,
+       WiFi.RSSI());
+}
 
 Network::State Network::get_state() { return state_; }
 
