@@ -31,6 +31,12 @@ jobs:
           # firmware and the SPIFFS image, so the checkout needs real git
           # metadata rather than a detached blob.
           fetch-depth: 0
+          # On a pull_request event the default checkout is a merge commit
+          # that exists nowhere in the branch, so a device would report a
+          # sha nobody can look up. Build the branch head instead. The
+          # trade-off is that CI tests the branch as-is rather than merged
+          # with the base, which is what a build stamp should describe.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       # Artifact names carry the sha so successive downloads land as
       # homebuttons-original-<sha>.zip instead of "firmware-original (3)".
