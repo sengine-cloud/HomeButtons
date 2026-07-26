@@ -109,10 +109,31 @@ row3 │ btn 5   │ btn 6   │  minus  - press to correct
 Labels 3 and 4 carry the running totals, so anything you type there is
 replaced on the next press. Everything else is left exactly as you set it.
 
-Labels support `mdi:<name>` for an icon and
-`mdi:<name> Text` for both — `plus` and `minus` ship in the SPIFFS image;
-any other name renders a placeholder glyph, since there is no runtime icon
-download in this fork.
+### Icons
+
+Labels support `mdi:<name>` for an icon, or `mdi:<name> Text` for both.
+
+**Icon list: <https://pictogrammers.com/library/mdi/>** — use the name
+exactly as shown there, lowercase and hyphenated (`bread-slice`, `coffee`,
+`cash-register`).
+
+The device downloads nothing at runtime, so an icon has to be baked into
+the SPIFFS image first. `plus` and `minus` are drawn locally and always
+present; anything else is fetched **at build time** and flashed:
+
+```bash
+cd Firmware/HomeButtonsArduino
+python tools/make_icons.py coffee bread-slice
+pio run -e original_release -t buildfs -t uploadfs
+```
+
+A name that doesn't exist fails the build rather than turning into a
+placeholder glyph you'd only notice on the device.
+
+Then set the label — e.g. button 1 to `mdi:coffee` or `mdi:coffee Beans`.
+
+A label naming an icon that isn't in the image renders the
+`file_question_outline` placeholder.
 
 Counters clamp to `0 … 999999`. Decrementing at zero is a no-op, not an
 error.
