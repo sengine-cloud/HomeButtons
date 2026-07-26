@@ -336,6 +336,19 @@ void App::_handle_ui_event_global(UserInput::Event event) {
   device_state_.flags().last_user_input_time = millis();
 }
 
+void App::_service_display() {
+  if (!device_state_.flags().display_redraw) return;
+  // Coalesce a burst so a run of presses does not queue up a full e-paper
+  // refresh each. The timestamp only moves when something is actually
+  // drawn, so the first press after an idle spell redraws straight away
+  // rather than waiting out an interval that has been ticking in the
+  // background.
+  if (millis() - last_m_display_redraw_ < AWAKE_REDRAW_INTERVAL) return;
+  device_state_.flags().display_redraw = false;
+  last_m_display_redraw_ = millis();
+  display_.disp_main();
+}
+
 void App::_main_task() {
   info("woke up.");
   info("cpu freq: %d MHz", getCpuFrequencyMhz());
@@ -560,6 +573,7 @@ void App::_main_task() {
   debug("Starting main state machine loop");
   while (true) {
     loop();
+    _service_display();
     esp_task_wdt_reset();
     delay(10);
   }
@@ -615,14 +629,6 @@ void AppSMStates::AwakeModeIdleState::exit() {
 
 void AppSMStates::AwakeModeIdleState::loop() {
   sm()._flush_pending();
-
-  if (millis() - sm().last_m_display_redraw_ >= AWAKE_REDRAW_INTERVAL) {
-    if (sm().device_state_.flags().display_redraw) {
-      sm().device_state_.flags().display_redraw = false;
-      sm().display_.disp_main();
-    }
-    sm().last_m_display_redraw_ = millis();
-  }
 
   if (!sm().hw_.is_dc_connected()) {
     sm().device_state_.sensors().charging = false;
@@ -791,14 +797,6 @@ void AppSMStates::SessionState::exit() { sm().bsl_input_.ClearEventCallback(); }
 
 void AppSMStates::SessionState::loop() {
   sm()._flush_pending();
-
-  if (millis() - sm().last_m_display_redraw_ >= AWAKE_REDRAW_INTERVAL) {
-    if (sm().device_state_.flags().display_redraw) {
-      sm().device_state_.flags().display_redraw = false;
-      sm().display_.disp_main();
-    }
-    sm().last_m_display_redraw_ = millis();
-  }
 
   if (millis() - sm().session_last_input_time_ > SESSION_IDLE_TIMEOUT) {
     sm().info("session idle, shutting down");

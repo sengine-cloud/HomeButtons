@@ -200,6 +200,11 @@ class App : public AppStateMachine, public Logger {
 
   void _handle_ui_event_global(UserInput::Event event);
   void _net_on_connect();
+  // Redraws the main screen when a press has changed it. Driven from the
+  // main loop rather than from individual states, so the number on the
+  // display follows the button press regardless of what the state machine
+  // is doing - notably while the network is still connecting.
+  void _service_display();
 
   // Counter plumbing ---------------------------------------------------
   // Returns true and fills idx/delta when btn_id is one of the four
