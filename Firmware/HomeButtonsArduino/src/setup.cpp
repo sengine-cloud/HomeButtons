@@ -22,6 +22,12 @@ static WiFiManagerParameter endpoint_url_param("endpoint", "Webhook URL", "",
 static WiFiManagerParameter auth_token_param("auth_token", "Auth Token", "",
                                              AUTH_TOKEN_MAXLEN,
                                              "type=\"password\"");
+// Keeps the device from deep sleeping. Needed to hold a USB CDC console
+// open while debugging, since sleep tears the USB device down. Upstream set
+// this over MQTT; with MQTT gone the portal is the only way to reach it.
+// Drains the battery quickly - leave it off for normal use.
+static WiFiManagerParameter awake_mode_param(
+    "awake_mode", "Awake Mode (debug, drains battery) - 1 or 0", "", 1);
 static WiFiManagerParameter static_ip_param("static_ip", "Static IP", "", 15);
 static WiFiManagerParameter gateway_param("gateway", "Gateway", "", 15);
 static WiFiManagerParameter subnet_param("subnet", "Subnet Mask", "", 15);
@@ -175,6 +181,11 @@ void HBSetup::save_params_callback() {
   app_.device_state_.set_endpoint_url(
       EndpointUrlType{endpoint_url_param.getValue()});
   app_.device_state_.set_auth_token(AuthTokenType{auth_token_param.getValue()});
+  {
+    const char* v = awake_mode_param.getValue();
+    app_.device_state_.persisted().user_awake_mode =
+        (v != nullptr && (v[0] == '1' || v[0] == 'y' || v[0] == 'Y'));
+  }
 
 #if defined(HAS_DISPLAY)
   set_device_state_from_btn_label_params(app_.device_state_);
@@ -212,6 +223,8 @@ void HBSetup::start_setup() {
                               ENDPOINT_URL_MAXLEN);
   auth_token_param.setValue(app_.device_state_.auth_token().c_str(),
                             AUTH_TOKEN_MAXLEN);
+  awake_mode_param.setValue(
+      app_.device_state_.persisted().user_awake_mode ? "1" : "0", 1);
   static_ip_param.setValue(app_.device_state_.user_preferences()
                                .network.static_ip.toString()
                                .c_str(),
@@ -236,6 +249,7 @@ void HBSetup::start_setup() {
   wifi_manager.addParameter(&device_name_param);
   wifi_manager.addParameter(&endpoint_url_param);
   wifi_manager.addParameter(&auth_token_param);
+  wifi_manager.addParameter(&awake_mode_param);
   wifi_manager.addParameter(&static_ip_param);
   wifi_manager.addParameter(&gateway_param);
   wifi_manager.addParameter(&subnet_param);

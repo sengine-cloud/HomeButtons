@@ -77,6 +77,7 @@ The portal opens at `http://192.168.4.1` and closes after 10 minutes.
 | **Device Name** | Cosmetic; shown on the settings screen |
 | **Webhook URL** | Full HTTPS URL of the n8n **production** webhook. Max 128 chars |
 | **Auth Token** | Sent as `Authorization: Bearer <token>`. Max 128 chars. Masked in the page |
+| **Awake Mode** | `1` keeps the device from deep sleeping — needed to hold a USB serial console open. `0` for normal use. Drains the battery fast |
 | Static IP / Gateway / Subnet / DNS / DNS 2 | Optional — leave blank for DHCP. All three of IP, gateway and subnet must be set for static to apply |
 | Button 1-6 Label | See below |
 
@@ -176,7 +177,42 @@ Serial at 115200 baud shows the whole flow (`pio device monitor`).
 | Device never sleeps | It is on USB power, so it stays in awake mode |
 | Placeholder glyph instead of an icon | Icon not in the SPIFFS image — only `plus` and `minus` ship. Re-run `tools/make_icons.py` and `-t uploadfs` |
 
-## 8. Compile-time settings
+## 8. Reading logs
+
+Two routes, and they differ by build:
+
+| Build | Console | How to read it |
+|---|---|---|
+| `original_release` | **UART0**, 115200 | `TX` + `GND` on the CMSIS-DAP header, via a 3.3 V USB-serial adapter |
+| `original_debug` | **USB CDC**, 115200 | Just the USB-C cable |
+
+```bash
+pio run -e original_debug -t upload && pio device monitor
+```
+
+The `esp32_exception_decoder` filter is preconfigured, so panics come back
+symbolised.
+
+**For USB CDC, set Awake Mode to `1` first.** Deep sleep tears the USB device
+down, so the port disappears and re-enumerates on every wake and your
+terminal drops — right across the transition you probably want to watch.
+
+Two things USB CDC cannot do, by construction:
+
+- **Early boot is lost.** The port only exists after USB enumeration, so ROM
+  bootloader and early IDF output never appear. Anything boot-related needs
+  the UART pins.
+- **It changes what you are observing.** USB-C supplies power, so
+  `is_dc_connected()` goes true and the device may pick awake mode on its
+  own. With the UART header you connect only `TX` and `GND` — leave `5V`
+  and `3V3` alone — and the device keeps running on battery, so you see the
+  real wake → connect → post → session → sleep cycle.
+
+A CMSIS-DAP probe on the same header gives gdb as well:
+`pio run -e original_debug -t upload` then `pio debug`, using the
+`esp32s2_cmsisdap.cfg` already in the repo.
+
+## 9. Compile-time settings
 
 These have no portal field and need a rebuild — all in
 `Firmware/HomeButtonsArduino/src/config.h`:
