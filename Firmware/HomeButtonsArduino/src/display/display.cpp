@@ -68,6 +68,18 @@ ButtonLabel Display::get_text(ButtonLabel label) {
   }
 }
 
+// True when a label is nothing but a number, optionally negative - which in
+// practice means a counter total. Those get a much larger font and are never
+// trimmed, so a count reads at a glance from across the room.
+static bool is_numeric_label(const ButtonLabel& label) {
+  size_t i = (label[0] == '-') ? 1 : 0;
+  if (i >= label.length()) return false;  // empty, or "-" on its own
+  for (; i < label.length(); i++) {
+    if (label[i] < '0' || label[i] > '9') return false;
+  }
+  return true;
+}
+
 // Shrinks label one character at a time, keeping a trailing ".", until it is
 // narrower than max_width. The length() > 1 bound is load bearing: without it
 // a max_width smaller than a single glyph underflows length() - 2 to SIZE_MAX,
@@ -441,7 +453,21 @@ void Display::draw_main() {
       u8g2.print(text.c_str());
     } else {
       uint16_t max_label_width = WIDTH - min_btn_clearance;
-      if (label.index_of('_') == 0) {
+      const bool numeric = is_numeric_label(label);
+      if (numeric) {
+        // A counter total shares its row with the other counter, so budget
+        // half the display. helvB24 leaves a two-digit count adrift in a
+        // cell nearly 100px tall, so step down a ladder of large numeric
+        // fonts instead and take the first that fits.
+        max_label_width = WIDTH / 2 - h_padding * 2;
+        static const uint8_t* const kNumericFonts[] = {
+            u8g2_font_logisoso42_tn, u8g2_font_logisoso32_tn,
+            u8g2_font_helvB24_te, u8g2_font_helvB18_te};
+        for (const uint8_t* font : kNumericFonts) {
+          u8g2.setFont(font);
+          if (u8g2.getUTF8Width(label.c_str()) < max_label_width) break;
+        }
+      } else if (label.index_of('_') == 0) {
         // force small font
         label = label.substring(1);
         u8g2.setFont(u8g2_font_helvB18_te);
@@ -450,7 +476,9 @@ void Display::draw_main() {
       }
       uint16_t w, h;
       w = u8g2.getUTF8Width(label.c_str());
-      if (w >= max_label_width) {
+      // Numbers are never trimmed: "12..." is a wrong value, not a
+      // shortened word. An implausibly long count just runs small.
+      if (!numeric && w >= max_label_width) {
         u8g2.setFont(u8g2_font_helvB18_te);
         // trim_text() is bounded, so this always terminates
         label = trim_text(label, max_label_width);

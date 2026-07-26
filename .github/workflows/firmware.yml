@@ -45,6 +45,16 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
+      # make_icons.py rasterises the MDI SVGs listed in icons.txt. Normally
+      # already on the runner image; install only if it is not, rather than
+      # paying for an apt update on every run.
+      - name: Ensure ImageMagick
+        run: |
+          if ! command -v convert >/dev/null && ! command -v magick >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+          fi
+          (magick -version || convert -version) 2>/dev/null | head -1
+
       # Both environments are built and published. They are not
       # interchangeable: original_debug routes the console to USB CDC and
       # uses QIO flash mode, so it has its own bootloader.bin as well as its

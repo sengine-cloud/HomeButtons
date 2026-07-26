@@ -119,18 +119,35 @@ exactly as shown there, lowercase and hyphenated (`bread-slice`, `coffee`,
 
 The device downloads nothing at runtime, so an icon has to be baked into
 the SPIFFS image first. `plus` and `minus` are drawn locally and always
-present; anything else is fetched **at build time** and flashed:
+present. Anything else goes in **`Firmware/HomeButtonsArduino/icons.txt`**,
+one name per line:
+
+```
+food-drumstick
+dog-service
+```
+
+Then rebuild and flash the image:
 
 ```bash
 cd Firmware/HomeButtonsArduino
-python tools/make_icons.py coffee bread-slice
+python tools/make_icons.py
 pio run -e original_release -t buildfs -t uploadfs
 ```
 
+CI reads the same file, so anything listed there is in the published
+artifacts too. A name can also be passed on the command line for a one-off
+(`python tools/make_icons.py coffee`).
+
+SVGs come straight from the canonical
+[Templarian/MaterialDesign](https://github.com/Templarian/MaterialDesign)
+repository, pinned to a commit in `make_icons.py`, and are rasterised
+locally with ImageMagick — no dependency on anyone's icon CDN staying up.
 A name that doesn't exist fails the build rather than turning into a
 placeholder glyph you'd only notice on the device.
 
-Then set the label — e.g. button 1 to `mdi:coffee` or `mdi:coffee Beans`.
+Then set the label — e.g. button 1 to `mdi:food-drumstick`, or
+`mdi:food-drumstick Wings` for icon plus text.
 
 A label naming an icon that isn't in the image renders the
 `file_question_outline` placeholder.
