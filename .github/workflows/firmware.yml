@@ -45,15 +45,19 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
+      # Both environments are built and published. They are not
+      # interchangeable: original_debug routes the console to USB CDC and
+      # uses QIO flash mode, so it has its own bootloader.bin as well as its
+      # own firmware.bin.
       - name: Build firmware
         working-directory: Firmware/HomeButtonsArduino
-        run: pio run -e original_release
+        run: pio run -e original_release -e original_debug
 
       - name: Build SPIFFS image
         working-directory: Firmware/HomeButtonsArduino
         run: |
           python tools/make_icons.py
-          pio run -e original_release -t buildfs
+          pio run -e original_release -e original_debug -t buildfs
 
       # The app partition was 95.8% full before this fork stripped MQTT and
       # the icon downloader. Fail loudly rather than discovering at flash
@@ -62,37 +66,57 @@ jobs:
         working-directory: Firmware/HomeButtonsArduino
         run: |
           set -euo pipefail
-          SIZE=$(stat -c%s .pio/build/original_release/firmware.bin)
           LIMIT=$((0x1A0000))
-          PCT=$((SIZE * 100 / LIMIT))
-          echo "firmware.bin: ${SIZE} bytes of ${LIMIT} (${PCT}%)"
-          echo "firmware.bin: ${SIZE} / ${LIMIT} bytes (${PCT}%)" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$PCT" -ge 90 ]; then
-            echo "::error::firmware is ${PCT}% of the app partition"
-            exit 1
-          fi
+          FAIL=0
+          for ENV in original_release original_debug; do
+            SIZE=$(stat -c%s ".pio/build/${ENV}/firmware.bin")
+            PCT=$((SIZE * 100 / LIMIT))
+            echo "${ENV}: ${SIZE} of ${LIMIT} bytes (${PCT}%)"
+            echo "\`${ENV}\`: ${SIZE} / ${LIMIT} bytes (${PCT}%)" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$PCT" -ge 90 ]; then
+              echo "::error::${ENV} firmware is ${PCT}% of the app partition"
+              FAIL=1
+            fi
+          done
+          exit "$FAIL"
 
       # upload-artifact derives the archive layout from the common ancestor of
       # its paths, so listing files by their build-tree location buries them
-      # under .pio/build/original_release/ in the download. Stage them in one
-      # flat directory instead, so unzipping gives you the images next to each
-      # other, ready to flash.
+      # under .pio/build/<env>/ in the download. Stage each environment into
+      # its own flat directory instead, so unzipping either artifact gives
+      # you the images side by side, ready to flash.
+      #
+      # Two artifacts rather than one with subdirectories: both environments
+      # produce a firmware.bin and a bootloader.bin, so a single flat
+      # directory cannot hold both, and subdirectories would reintroduce the
+      # nesting this exists to avoid.
       - name: Stage flash images
         working-directory: Firmware/HomeButtonsArduino
         run: |
           set -euo pipefail
-          mkdir -p dist
-          cp .pio/build/original_release/bootloader.bin \
-             .pio/build/original_release/partitions.bin \
-             .pio/build/original_release/ota_data_initial.bin \
-             .pio/build/original_release/firmware.bin \
-             .pio/build/original_release/spiffs.bin \
-             partitions.csv \
-             dist/
-          ls -l dist
+          for ENV in original_release original_debug; do
+            mkdir -p "dist/${ENV}"
+            cp ".pio/build/${ENV}/bootloader.bin" \
+               ".pio/build/${ENV}/partitions.bin" \
+               ".pio/build/${ENV}/ota_data_initial.bin" \
+               ".pio/build/${ENV}/firmware.bin" \
+               ".pio/build/${ENV}/spiffs.bin" \
+               partitions.csv \
+               "dist/${ENV}/"
+            echo "--- dist/${ENV} ---"
+            ls -l "dist/${ENV}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-original
-          path: Firmware/HomeButtonsArduino/dist/
+          path: Firmware/HomeButtonsArduino/dist/original_release/
+          if-no-files-found: error
+
+      # Console on USB CDC - flash this one when you want logs over the
+      # USB-C cable instead of the UART pins on the debug header.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-original-debug
+          path: Firmware/HomeButtonsArduino/dist/original_debug/
           if-no-files-found: error
