@@ -2,6 +2,7 @@
 #define HOMEBUTTONS_APP_H
 
 #include <array>
+#include <atomic>
 #include "freertos/FreeRTOS.h"  // must precede queue.h
 #include "freertos/queue.h"
 #include "state.h"
@@ -242,6 +243,18 @@ class App : public AppStateMachine, public Logger {
     uint32_t queued_at;
   };
   QueueHandle_t press_queue_ = nullptr;
+
+  // Presses queued but not yet confirmed delivered, per button. Incremented
+  // on the UI task and decremented on the main task, hence atomic.
+  //
+  // The LED is only released when a button's count returns to zero. Without
+  // this, pressing the same button while its first press is still in flight
+  // would light the LED, then have the first press's 200 immediately clear
+  // it again - LED dark while a press was still pending.
+  std::array<std::atomic<uint8_t>, NUM_BUTTONS> inflight_{};
+  // Set if any press in the current burst failed, so the button can end on
+  // the error pattern rather than simply going dark.
+  std::array<std::atomic<bool>, NUM_BUTTONS> send_failed_{};
 
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;

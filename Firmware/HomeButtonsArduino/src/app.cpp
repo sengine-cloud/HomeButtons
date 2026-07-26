@@ -257,6 +257,8 @@ void App::_handle_counter_press(uint8_t btn_id) {
   int32_t delta = 0;
   if (!_btn_to_counter(btn_id, idx, delta)) {
     debug("button %u is not assigned to a counter", btn_id);
+    // Two quick blinks: registered, but nothing is bound to this button.
+    bsl_input_.LEDBlink(btn_id, 2, 0, 0, 0, false);
     return;
   }
 
@@ -266,6 +268,14 @@ void App::_handle_counter_press(uint8_t btn_id) {
 
   _refresh_counter_labels();
   device_state_.flags().display_redraw = true;
+
+  // Solid while the press is in flight. _flush_pending() clears it once
+  // every press on this button has been delivered, so the LED reports
+  // delivery rather than merely "the device is awake".
+  if (inflight_[btn_id - 1].fetch_add(1) == 0) {
+    send_failed_[btn_id - 1] = false;  // start of a fresh burst
+  }
+  bsl_input_.LEDOn(btn_id);
 
   PressQueueElement element{};
   element.event.counter_idx = idx;
@@ -281,6 +291,10 @@ void App::_handle_counter_press(uint8_t btn_id) {
     // lost. The next delivered press carries the corrected absolute count.
     error("press queue full, event for counter %s not sent",
           COUNTER_NAMES[idx]);
+    send_failed_[btn_id - 1] = true;
+    if (inflight_[btn_id - 1].fetch_sub(1) == 1) {
+      bsl_input_.LEDBlink(btn_id, 3, 0, 0, 0, false);
+    }
   }
 }
 
@@ -296,8 +310,23 @@ void App::_flush_pending() {
   PressQueueElement element;
   while (xQueueReceive(press_queue_, &element, 0) == pdTRUE) {
     element.event.age_ms = millis() - element.queued_at;
+    const uint8_t btn = element.event.button_id;
     if (!webhook_.send_press(element.event)) {
       warning("failed to deliver press seq %u", element.event.seq);
+      if (btn >= 1 && btn <= NUM_BUTTONS) send_failed_[btn - 1] = true;
+    }
+    // Only release the LED once nothing is left in flight for this button:
+    // a press that lands while a later one is still queued must not take
+    // the light out from under it.
+    if (btn >= 1 && btn <= NUM_BUTTONS &&
+        inflight_[btn - 1].fetch_sub(1) == 1) {
+      if (send_failed_[btn - 1]) {
+        // Three fast blinks, then dark. Distinguishable from the solid
+        // in-flight state and from the two-blink unassigned pattern.
+        bsl_input_.LEDBlink(btn, 3, 0, 0, 0, false);
+      } else {
+        bsl_input_.LEDOff(btn);
+      }
     }
     esp_task_wdt_reset();
   }
@@ -628,7 +657,6 @@ void AppSMStates::AwakeModeIdleState::handle_ui_event(UserInput::Event event) {
     switch (event.type) {
       case UserInput::EventType::kClickSingle:
         sm()._handle_counter_press(event.btn_id);
-        sm().bsl_input_.LEDBlink(event.btn_id, 1, 0, 0, 0, false);
         break;
       default:
         break;
@@ -687,7 +715,6 @@ void AppSMStates::SleepModeHandleInput::handle_ui_event(
           ESP.restart();
         }
         sm()._handle_counter_press(event.btn_id);
-        sm().bsl_input_.LEDBlink(event.btn_id, 1, 0, 0, 0, true);
         if (sm().device_state_.sensors().battery_low) {
           sm().display_.disp_message_large(BATT_EMPTY_MSG, 3000);
         }
@@ -757,7 +784,6 @@ void AppSMStates::NetConnectingState::handle_ui_event(UserInput::Event event) {
   if (event.final && event.type == UserInput::EventType::kClickSingle) {
     // Queued now, delivered as soon as the link comes up.
     sm()._handle_counter_press(event.btn_id);
-    sm().bsl_input_.LEDBlink(event.btn_id, 1, 0, 0, 0, true);
   }
 }
 
@@ -794,7 +820,6 @@ void AppSMStates::SessionState::handle_ui_event(UserInput::Event event) {
   if (event.final) {
     if (event.type == UserInput::EventType::kClickSingle) {
       sm()._handle_counter_press(event.btn_id);
-      sm().bsl_input_.LEDBlink(event.btn_id, 1, 0, 0, 0, false);
     }
   } else {
     switch (event.type) {
