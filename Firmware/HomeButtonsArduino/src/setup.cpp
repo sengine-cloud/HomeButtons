@@ -100,6 +100,13 @@ void HBSetup::start_wifi_setup() {
   // regulatory domain and a network on channel 12 or 13 simply does not
   // appear, which reads as the network being gone rather than unscannable.
   apply_wifi_country(app_.device_state_.wifi_country().c_str(), app_);
+
+  // The country belongs in this portal, not only the full one: it is a
+  // Wi-Fi setting, and this is the flow you are in when you discover a
+  // network missing from the scan list.
+  wifi_country_param.setValue(app_.device_state_.wifi_country().c_str(),
+                              WIFI_COUNTRY_MAXLEN);
+  wifi_manager.addParameter(&wifi_country_param);
   wifi_manager.setTitle(app_.device_state_.get_model_name_w_rand_id().c_str());
   wifi_manager.setBreakAfterConfig(true);
   wifi_manager.setDarkMode(true);
@@ -138,6 +145,18 @@ void HBSetup::start_wifi_setup() {
     delay(3000);
 #endif
     ESP.restart();
+  }
+
+  // This portal has no save-params callback, so read the field back by hand
+  // before it is needed for the reconnect below.
+  {
+    CountryCodeType cc{wifi_country_param.getValue()};
+    cc.to_upper_case();
+    if (!(cc == app_.device_state_.wifi_country())) {
+      app_.device_state_.set_wifi_country(cc);
+      app_.device_state_.save_user();
+      info("Wi-Fi country set to '%s'", cc.c_str());
+    }
   }
 
   info("Wi-Fi config portal stopped, trying to connect to Wi-Fi...");

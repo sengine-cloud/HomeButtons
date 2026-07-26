@@ -45,7 +45,7 @@ fields are empty — the device boots, counts locally, and silently logs
 |---|---|
 | Hold **any two buttons, 5 s** | Settings menu |
 | Then press **button 1** | Setup portal (Wi-Fi + all settings) |
-| Then press **button 2** | Wi-Fi only |
+| Then press **button 2** | Wi-Fi only — also carries the **Wi-Fi Country** field |
 | Then press **button 3** | Restart |
 | Then press **button 4** | Cancel |
 | In settings, hold **button 1, 2 s** | Device Info screen |
