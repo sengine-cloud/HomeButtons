@@ -189,9 +189,16 @@ void HBSetup::save_params_callback() {
     // Normalised through the parser so whatever lands in NVS is canonical
     // and a typo cannot silently disable the reset.
     const ResetSpecType entered{reset_spec_param.getValue()};
+    bool ok = false;
     const auto spec = reset_schedule::parse(
-        entered.empty() ? RESET_SPEC_DFLT : entered.c_str(), app_);
-    app_.device_state_.set_reset_spec(reset_schedule::format(spec));
+        entered.empty() ? RESET_SPEC_DFLT : entered.c_str(), &ok);
+    if (!ok) {
+      app_.warning("reset spec '%s' not understood, storing default",
+                   entered.c_str());
+    }
+    char canonical[reset_schedule::kSpecMaxLen + 1] = {};
+    reset_schedule::format(spec, canonical, sizeof(canonical));
+    app_.device_state_.set_reset_spec(ResetSpecType{canonical});
   }
   {
     const char* v = awake_mode_param.getValue();

@@ -125,7 +125,10 @@ bool Webhook::send_reset(const char* mode) {
 
 bool Webhook::sync_time() {
   Event event{};
-  event.seq = device_state_.seq();  // no side effect, so no new sequence
+  // Still takes a sequence number: 'unique per request' is the invariant
+  // the field documents, and reusing one would break a receiver that ever
+  // dedupes outside the press branch.
+  event.seq = device_state_.next_seq();
   char body[HTTP_PAYLOAD_SIZE];
   size_t len = _build_body(body, sizeof(body), event, "time", nullptr);
   debug("time sync body: %s", body);

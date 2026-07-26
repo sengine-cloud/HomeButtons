@@ -1,11 +1,9 @@
 #ifndef HOMEBUTTONS_RESET_SCHEDULE_H
 #define HOMEBUTTONS_RESET_SCHEDULE_H
 
+#include <stddef.h>
+#include <stdint.h>
 #include <time.h>
-
-#include "config.h"
-#include "logger.h"
-#include "types.h"
 
 // When the counters clear themselves.
 //
@@ -27,6 +25,14 @@
 // reset silently.
 namespace reset_schedule {
 
+// Deliberately free of Arduino, Logger and config.h so the whole of this
+// unit can be compiled and unit-tested on the host. Every calendar bug in
+// here is the kind that only shows up months later on a device, which is
+// exactly the code that should not need hardware to exercise.
+static constexpr size_t kSpecMaxLen = 24;
+static constexpr uint32_t kWakeMinSeconds = 5;
+static constexpr uint32_t kWakeMaxSeconds = 24UL * 60UL * 60UL;
+
 enum class Mode : uint8_t { kOff, kDaily, kWeekly, kMonthly };
 
 struct Spec {
@@ -38,11 +44,14 @@ struct Spec {
 
 const char* mode_name(Mode mode);
 
-// Never fails: an unrecognised spec logs and yields the default.
-Spec parse(const char* text, const Logger& log);
+// Never fails: an unrecognised spec yields the default. `ok` reports
+// whether the input was understood exactly, so the caller can log without
+// this unit needing a logger.
+Spec parse(const char* text, bool* ok = nullptr);
 
 // Renders a spec back to its canonical text, for the portal field.
-StaticString<RESET_SPEC_MAXLEN> format(const Spec& spec);
+// Writes at most out_size bytes including the terminator.
+void format(const Spec& spec, char* out, size_t out_size);
 
 // The reset period a given local time falls in, as a plain integer that
 // only changes when a boundary is crossed. Comparing this against the

@@ -28,6 +28,8 @@ App::App()
       setup_(*this) {
   press_queue_ = xQueueCreate(PRESS_QUEUE_SIZE, sizeof(PressQueueElement));
   if (press_queue_ == nullptr) error("failed to create press queue");
+  state_mutex_ = xSemaphoreCreateRecursiveMutex();
+  if (state_mutex_ == nullptr) error("failed to create state mutex");
 }
 
 void App::setup() {
@@ -47,6 +49,9 @@ void App::setup() {
 void App::_sleep_or_restart() {
   delay(3000);
   error("Going to sleep...");
+  // Even a failure sleep should wake for the reset rather than falling back
+  // to the heartbeat interval.
+  _schedule_next_wake();
   _start_esp_sleep();
 }
 
@@ -246,7 +251,15 @@ void App::_refresh_counter_labels() {
 }
 
 reset_schedule::Spec App::_reset_spec() {
-  return reset_schedule::parse(device_state_.reset_spec().c_str(), *this);
+  bool ok = false;
+  const reset_schedule::Spec spec =
+      reset_schedule::parse(device_state_.reset_spec().c_str(), &ok);
+  if (!ok) {
+    warning("reset spec '%s' not understood, using %s",
+            device_state_.reset_spec().c_str(),
+            reset_schedule::mode_name(spec.mode));
+  }
+  return spec;
 }
 
 bool App::_clock_fresh() const {
@@ -261,6 +274,7 @@ bool App::_clock_fresh() const {
 
 void App::_check_reset() {
   if (!_clock_fresh()) return;
+  StateLock lock(state_mutex_);
 
   const reset_schedule::Spec spec = _reset_spec();
   if (spec.mode == reset_schedule::Mode::kOff) return;
@@ -306,6 +320,7 @@ void App::_schedule_next_wake() {
 
 // Runs on the UI task. RAM only: no NVS write, no HTTP.
 void App::_handle_counter_press(uint8_t btn_id) {
+  StateLock lock(state_mutex_);
   // Before anything else: a press just after a boundary belongs to the new
   // period, not the one that ended. The clock survives deep sleep, so this
   // is knowable without the network.
@@ -362,8 +377,11 @@ void App::_flush_pending() {
   if (uxQueueMessagesWaiting(press_queue_) == 0) return;
   if (network_.get_state() != Network::State::W_CONNECTED) return;
 
-  // One NVS write covers however many presses are waiting.
-  device_state_.save_all();
+  {
+    // One NVS write covers however many presses are waiting.
+    StateLock lock(state_mutex_);
+    device_state_.save_all();
+  }
 
   PressQueueElement element;
   while (xQueueReceive(press_queue_, &element, 0) == pdTRUE) {
@@ -391,32 +409,49 @@ void App::_flush_pending() {
 }
 
 void App::_net_on_connect() {
-  webhook_.begin();
+  // NETWORK task. Deliberately does nothing but raise a flag: webhook_ owns
+  // one HTTPClient and one WiFiClientSecure, and _flush_pending() drives
+  // them from the main task. Posting from here would put two tasks on the
+  // same TLS connection - reachable on any connect with a queued press,
+  // because Network reports W_CONNECTED one state before this fires.
+  net_connected_event_ = true;
+}
 
-  const bool have_presses =
-      press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
-  const time_t now = time(nullptr);
-  const bool clock_old =
-      !device_state_.clock_valid() ||
-      (now - static_cast<time_t>(device_state_.last_time_sync())) >
-          static_cast<time_t>(CLOCK_RESYNC_SECONDS);
+// MAIN task. Sole owner of webhook_.
+void App::_service_webhook() {
+  if (network_.get_state() != Network::State::W_CONNECTED) return;
 
-  if (boot_cause_ == BootCause::TIMER) {
-    webhook_.send_heartbeat();
-  } else if (!have_presses && clock_old) {
-    // Every response carries the clock, so a bare sync is only worth
-    // sending when nothing else is going out anyway.
-    webhook_.sync_time();
+  if (net_connected_event_.exchange(false)) {
+    webhook_.begin();
+
+    const bool have_presses =
+        press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
+    const time_t now = time(nullptr);
+    const bool clock_old =
+        !device_state_.clock_valid() ||
+        (now - static_cast<time_t>(device_state_.last_time_sync())) >
+            static_cast<time_t>(CLOCK_RESYNC_SECONDS);
+
+    if (boot_cause_ == BootCause::TIMER) {
+      webhook_.send_heartbeat();
+    } else if (!have_presses && clock_old) {
+      // Every response carries the clock, so a bare sync is only worth
+      // sending when nothing else is going out anyway.
+      webhook_.sync_time();
+    }
+
+    // The clock may only just have become valid, so re-test the boundary
+    // now that it has.
+    _check_reset();
   }
 
-  // The clock may only just have become valid, so re-test the boundary now
-  // that it has.
-  _check_reset();
-  if (reset_to_report_) {
+  if (reset_to_report_.load()) {
     if (webhook_.send_reset(reset_schedule::mode_name(_reset_spec().mode))) {
       reset_to_report_ = false;
     }
   }
+
+  _flush_pending();
 }
 
 void App::_handle_ui_event_global(UserInput::Event event) {
@@ -664,6 +699,7 @@ void App::_main_task() {
   debug("Starting main state machine loop");
   while (true) {
     loop();
+    _service_webhook();
     _service_display();
     esp_task_wdt_reset();
     delay(10);

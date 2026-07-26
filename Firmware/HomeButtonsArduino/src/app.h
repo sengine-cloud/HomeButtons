@@ -5,6 +5,7 @@
 #include <atomic>
 #include "freertos/FreeRTOS.h"  // must precede queue.h
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "state.h"
 #include "network.h"
 #include "webhook.h"
@@ -200,7 +201,14 @@ class App : public AppStateMachine, public Logger {
   void _start_tasks();
 
   void _handle_ui_event_global(UserInput::Event event);
+  // Runs on the NETWORK task. Must not touch webhook_ - see
+  // _service_webhook().
   void _net_on_connect();
+  // Everything that talks to webhook_, on the main task only. Webhook owns
+  // a single HTTPClient and WiFiClientSecure; _net_on_connect() fires from
+  // the network task while _flush_pending() runs here, so doing the
+  // on-connect work there would put two tasks on one TLS connection.
+  void _service_webhook();
   // Redraws the main screen when a press has changed it. Driven from the
   // main loop rather than from individual states, so the number on the
   // display follows the button press regardless of what the state machine
@@ -220,6 +228,22 @@ class App : public AppStateMachine, public Logger {
   // this can run before the network is up - and must, so that a press just
   // after the boundary counts toward the new period rather than the old.
   void _check_reset();
+  // Guards the counters, the reset period and the button labels, which the
+  // UI task mutates on a press and the main task reads, saves and resets.
+  // Recursive because _handle_counter_press() calls _check_reset().
+  class StateLock {
+   public:
+    explicit StateLock(SemaphoreHandle_t m) : m_(m) {
+      if (m_ != nullptr) xSemaphoreTakeRecursive(m_, portMAX_DELAY);
+    }
+    ~StateLock() {
+      if (m_ != nullptr) xSemaphoreGiveRecursive(m_);
+    }
+    StateLock(const StateLock&) = delete;
+
+   private:
+    SemaphoreHandle_t m_;
+  };
   reset_schedule::Spec _reset_spec();
   bool _clock_fresh() const;
   // Seconds until the next boundary, into flags().schedule_wakeup_time.
@@ -275,7 +299,11 @@ class App : public AppStateMachine, public Logger {
   // Set when _check_reset() clears the counters, so the following connect
   // reports it. RAM only: if the report is lost, the next press carries
   // absolute counts and the receiver self-heals.
-  bool reset_to_report_ = false;
+  std::atomic<bool> reset_to_report_{false};
+  // Set by the network task when the link comes up; consumed by the main
+  // task, which owns webhook_.
+  std::atomic<bool> net_connected_event_{false};
+  SemaphoreHandle_t state_mutex_ = nullptr;
 
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;

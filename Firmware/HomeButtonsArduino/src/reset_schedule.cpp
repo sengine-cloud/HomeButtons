@@ -1,7 +1,9 @@
 #include "reset_schedule.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 namespace reset_schedule {
 namespace {
@@ -83,16 +85,23 @@ const char* mode_name(Mode mode) {
   }
 }
 
-Spec parse(const char* text, const Logger& log) {
+Spec parse(const char* text, bool* ok) {
   Spec spec;  // defaults to daily 03:00
+  if (ok != nullptr) *ok = true;
+  auto fail = [&]() {
+    if (ok != nullptr) *ok = false;
+  };
   if (text == nullptr || *text == '\0') return spec;
 
-  char buf[RESET_SPEC_MAXLEN + 1] = {};
+  char buf[kSpecMaxLen + 1] = {};
   snprintf(buf, sizeof(buf), "%s", text);
 
   char* save = nullptr;
   const char* mode_tok = strtok_r(buf, " \t", &save);
-  if (mode_tok == nullptr) return spec;
+  if (mode_tok == nullptr) {
+    fail();
+    return spec;
+  }
 
   if (strcasecmp(mode_tok, "off") == 0) {
     spec.mode = Mode::kOff;
@@ -102,7 +111,7 @@ Spec parse(const char* text, const Logger& log) {
   if (strcasecmp(mode_tok, "daily") == 0) {
     spec.mode = Mode::kDaily;
     if (!parse_hhmm(strtok_r(nullptr, " \t", &save), spec.minute_of_day)) {
-      log.warning("reset spec '%s': bad time, using 03:00", text);
+      fail();
     }
     return spec;
   }
@@ -112,12 +121,12 @@ Spec parse(const char* text, const Logger& log) {
     const char* day_tok = strtok_r(nullptr, " \t", &save);
     int weekday = (day_tok != nullptr) ? weekday_from_name(day_tok) : -1;
     if (weekday < 0) {
-      log.warning("reset spec '%s': bad weekday, using mon", text);
+      fail();
       weekday = 1;
     }
     spec.weekday = static_cast<uint8_t>(weekday);
     if (!parse_hhmm(strtok_r(nullptr, " \t", &save), spec.minute_of_day)) {
-      log.warning("reset spec '%s': bad time, using 03:00", text);
+      fail();
     }
     return spec;
   }
@@ -129,35 +138,40 @@ Spec parse(const char* text, const Logger& log) {
     // Capped at 28 deliberately: 29-31 would skip short months, which is a
     // surprising way for a reset to quietly not happen.
     if (day < 1 || day > 28) {
-      log.warning("reset spec '%s': day must be 1-28, using 1", text);
+      fail();
       day = 1;
     }
     spec.day_of_month = static_cast<uint8_t>(day);
     if (!parse_hhmm(strtok_r(nullptr, " \t", &save), spec.minute_of_day)) {
-      log.warning("reset spec '%s': bad time, using 03:00", text);
+      fail();
     }
     return spec;
   }
 
-  log.warning("reset spec '%s' not understood, using daily 03:00", text);
+  fail();
   return Spec{};
 }
 
-StaticString<RESET_SPEC_MAXLEN> format(const Spec& spec) {
+void format(const Spec& spec, char* out, size_t out_size) {
+  if (out == nullptr || out_size == 0) return;
   const int hour = spec.minute_of_day / 60;
   const int minute = spec.minute_of_day % 60;
   switch (spec.mode) {
     case Mode::kOff:
-      return StaticString<RESET_SPEC_MAXLEN>("off");
+      snprintf(out, out_size, "off");
+      break;
     case Mode::kWeekly:
-      return StaticString<RESET_SPEC_MAXLEN>(
-          "weekly %s %02d:%02d", kWeekdayNames[spec.weekday % 7], hour, minute);
+      snprintf(out, out_size, "weekly %s %02d:%02d",
+               kWeekdayNames[spec.weekday % 7], hour, minute);
+      break;
     case Mode::kMonthly:
-      return StaticString<RESET_SPEC_MAXLEN>("monthly %u %02d:%02d",
-                                             spec.day_of_month, hour, minute);
+      snprintf(out, out_size, "monthly %u %02d:%02d", spec.day_of_month, hour,
+               minute);
+      break;
     case Mode::kDaily:
     default:
-      return StaticString<RESET_SPEC_MAXLEN>("daily %02d:%02d", hour, minute);
+      snprintf(out, out_size, "daily %02d:%02d", hour, minute);
+      break;
   }
 }
 
@@ -238,14 +252,14 @@ uint32_t seconds_until_next(const Spec& spec, time_t local_time) {
       boundary_day * kSecondsPerDay + boundary_offset;
   int64_t delta = boundary - static_cast<int64_t>(local_time);
 
-  // Clamped into what the deep sleep timer accepts. SCHEDULE_WAKEUP_MAX is
+  // Clamped into what the deep sleep timer accepts. kWakeMaxSeconds is
   // 24h, so weekly and monthly simply wake once a day and re-evaluate -
   // which also keeps the clock resynced rather than drifting for a month.
-  if (delta < static_cast<int64_t>(SCHEDULE_WAKEUP_MIN)) {
-    delta = SCHEDULE_WAKEUP_MIN;
+  if (delta < static_cast<int64_t>(kWakeMinSeconds)) {
+    delta = kWakeMinSeconds;
   }
-  if (delta > static_cast<int64_t>(SCHEDULE_WAKEUP_MAX)) {
-    delta = SCHEDULE_WAKEUP_MAX;
+  if (delta > static_cast<int64_t>(kWakeMaxSeconds)) {
+    delta = kWakeMaxSeconds;
   }
   return static_cast<uint32_t>(delta);
 }
