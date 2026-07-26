@@ -37,10 +37,12 @@ void DeviceState::load_user() {
       user_preferences_.device_name, "device_name",
       (DeviceName{DEVICE_NAME_DFLT} + " " + factory_.random_id).c_str());
 
-  // Defaults describe the counter layout: buttons 1/3 increment counters A/B
-  // and show the current value, buttons 2/4 decrement, 5/6 are unassigned.
-  static const char* kDefaultLabels[NUM_BUTTONS] = {"A 0", "A -1", "B 0",
-                                                    "B -1", "",    ""};
+  // Two columns of three, one counter per column:
+  //   row 1  title, user-editable
+  //   row 2  running total, overwritten by the firmware on every press
+  //   row 3  decrement; minus.bmp ships in the SPIFFS image
+  static const char* kDefaultLabels[NUM_BUTTONS] = {
+      "A", "B", "0", "0", "mdi:minus", "mdi:minus"};
   for (int i = 0; i < NUM_BUTTONS; i++) {
     _load_to_static_string(user_preferences_.btn_labels[i],
                            StaticString<9>("btn%d_txt", i + 1).c_str(),

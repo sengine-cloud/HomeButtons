@@ -4,9 +4,20 @@ A fork of [**nplan/HomeButtons**](https://github.com/nplan/HomeButtons) that tur
 a *Home Buttons Original* (model A1) into a **two-channel tally counter** which
 reports each press to an HTTPS webhook.
 
-Press `+`, the number on the e-paper display goes up and a notification fires.
-Press `−` to correct a miscount. Two independent counters, four buttons, two
-spare.
+Press the number, it goes up on the e-paper display and a notification fires.
+Press `−` below it to correct a miscount.
+
+The six buttons are two columns of three — one counter per column:
+
+```
+┌─────────┬─────────┐
+│  Bread  │ Pastry  │   title    (yours to label, no action)
+├─────────┼─────────┤
+│    42   │    7    │   count    (press to add one)
+├─────────┼─────────┤
+│    −    │    −    │   minus    (press to correct)
+└─────────┴─────────┘
+```
 
 This is a derivative work, not a drop-in replacement for upstream firmware —
 MQTT and Home Assistant integration have been removed entirely.

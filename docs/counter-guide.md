@@ -87,16 +87,29 @@ fail the POST.
 
 ### Button labels
 
+The buttons are two columns of three, one counter per column:
+
+```
+      counter A   counter B
+     ┌─────────┬─────────┐
+row1 │ btn 1   │ btn 2   │  title  - your label or icon, no action
+     ├─────────┼─────────┤
+row2 │ btn 3   │ btn 4   │  count  - shows the total, press to add one
+     ├─────────┼─────────┤
+row3 │ btn 5   │ btn 6   │  minus  - press to correct
+     └─────────┴─────────┘
+```
+
 | Button | Role | Label behaviour |
 |---|---|---|
-| 1 | Counter **A** +1 | **Overwritten** each press with `A <count>` |
-| 2 | Counter **A** −1 | Yours to set. Default `A -1` |
-| 3 | Counter **B** +1 | **Overwritten** each press with `B <count>` |
-| 4 | Counter **B** −1 | Yours to set. Default `B -1` |
-| 5, 6 | unassigned | Yours to set. A press is ignored |
+| 1, 2 | Title | Yours to set. Defaults `A` / `B`. Pressing does nothing (two blinks) |
+| 3, 4 | Count, **+1** | **Overwritten** each press with the running total |
+| 5, 6 | **−1** | Yours to set. Default `mdi:minus` |
 
-Labels 1 and 3 carry the running totals, so anything you type there is
-replaced on the next press. Labels support `mdi:<name>` for an icon and
+Labels 3 and 4 carry the running totals, so anything you type there is
+replaced on the next press. Everything else is left exactly as you set it.
+
+Labels support `mdi:<name>` for an icon and
 `mdi:<name> Text` for both — `plus` and `minus` ship in the SPIFFS image;
 any other name renders a placeholder glyph, since there is no runtime icon
 download in this fork.
@@ -224,5 +237,7 @@ These have no portal field and need a rebuild — all in
 | `HTTP_TIMEOUT` | `10000` ms | Per-attempt timeout |
 | `HTTP_MAX_ATTEMPTS` | `3` | Retries per press, within the awake window |
 | `COUNTER_MIN` / `COUNTER_MAX` | `0` / `999999` | Clamp range |
-| `BTN_COUNTER_*` | 1-4 | Which button drives which counter |
+| `BTN_COUNTER_TITLE` | `{1, 2}` | Title buttons, per counter |
+| `BTN_COUNTER_INC` | `{3, 4}` | Count / increment buttons |
+| `BTN_COUNTER_DEC` | `{5, 6}` | Decrement buttons |
 | `COUNTER_NAMES` | `"a"`, `"b"` | The `counter` field in the payload |

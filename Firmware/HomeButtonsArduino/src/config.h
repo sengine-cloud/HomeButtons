@@ -40,13 +40,23 @@ static constexpr uint8_t BTN_LABEL_MAXLEN = 56;
 static constexpr uint8_t USER_MSG_MAXLEN = 64;
 
 // ------ counters ------
-// Two independent counters, each with an increment and a decrement button.
-// Buttons 5 and 6 are unassigned.
+// The buttons are physically two columns of three:
+//
+//     1  2
+//     3  4
+//     5  6
+//
+// One counter per column, read top to bottom:
+//     row 1  title    - user-set label or icon, no action
+//     row 2  count    - shows the running total, pressing it increments
+//     row 3  minus    - decrements, for corrections
+//
+// draw_main() places even label indices on the left and odd on the right,
+// in three rows, so label N already lands next to button N.
 static constexpr uint8_t NUM_COUNTERS = 2;
-static constexpr uint8_t BTN_COUNTER_A_INC = 1;
-static constexpr uint8_t BTN_COUNTER_A_DEC = 2;
-static constexpr uint8_t BTN_COUNTER_B_INC = 3;
-static constexpr uint8_t BTN_COUNTER_B_DEC = 4;
+static constexpr uint8_t BTN_COUNTER_TITLE[NUM_COUNTERS] = {1, 2};
+static constexpr uint8_t BTN_COUNTER_INC[NUM_COUNTERS] = {3, 4};
+static constexpr uint8_t BTN_COUNTER_DEC[NUM_COUNTERS] = {5, 6};
 static constexpr int32_t COUNTER_MIN = 0;
 static constexpr int32_t COUNTER_MAX = 999999;
 static constexpr char COUNTER_NAMES[NUM_COUNTERS][2] = {"a", "b"};

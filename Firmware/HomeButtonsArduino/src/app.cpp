@@ -216,39 +216,31 @@ void App::_start_tasks() {
 // ---------------------------------------------------------------------------
 
 bool App::_btn_to_counter(uint8_t btn_id, uint8_t& idx, int32_t& delta) {
-  switch (btn_id) {
-    case BTN_COUNTER_A_INC:
-      idx = 0;
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    if (btn_id == BTN_COUNTER_INC[i]) {
+      idx = i;
       delta = 1;
       return true;
-    case BTN_COUNTER_A_DEC:
-      idx = 0;
+    }
+    if (btn_id == BTN_COUNTER_DEC[i]) {
+      idx = i;
       delta = -1;
       return true;
-    case BTN_COUNTER_B_INC:
-      idx = 1;
-      delta = 1;
-      return true;
-    case BTN_COUNTER_B_DEC:
-      idx = 1;
-      delta = -1;
-      return true;
-    default:
-      return false;
+    }
   }
+  return false;  // title buttons and anything unmapped
 }
 
 void App::_refresh_counter_labels() {
-  // Only the increment buttons carry the running total; the decrement and
-  // spare button labels stay whatever the user configured in the portal.
-  device_state_.set_btn_label(
-      BTN_COUNTER_A_INC,
-      ButtonLabel("A %ld", static_cast<long>(device_state_.counter(0)))
-          .c_str());
-  device_state_.set_btn_label(
-      BTN_COUNTER_B_INC,
-      ButtonLabel("B %ld", static_cast<long>(device_state_.counter(1)))
-          .c_str());
+  // Middle row only. The title above says what the counter is and the minus
+  // below is a fixed glyph, so both stay exactly as configured in the
+  // portal - only the number is owned by the firmware.
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    device_state_.set_btn_label(
+        BTN_COUNTER_INC[i],
+        ButtonLabel("%ld", static_cast<long>(device_state_.counter(i)))
+            .c_str());
+  }
 }
 
 // Runs on the UI task. RAM only: no NVS write, no HTTP.
