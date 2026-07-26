@@ -591,6 +591,16 @@ void Display::draw_device_info() {
   u8g2.setCursor(0, 106);
   u8g2.print(device_state_.factory().unique_id.c_str());
 
+  // firmware build / filesystem build. They are flashed separately, so
+  // showing both makes a stale uploadfs obvious at a glance.
+  u8g2.setCursor(0, 118);
+  u8g2.print(StaticString<48>("fw   %s", BUILD_ID).c_str());
+  u8g2.setCursor(0, 130);
+  u8g2.print(StaticString<48>(
+                 "fs   %s",
+                 spiffs_build_.empty() ? "missing" : spiffs_build_.c_str())
+                 .c_str());
+
   UIState::MessageType ip_info =
       UIState::MessageType("IP: %s", device_state_.ip());
   u8g2.setCursor(0, 140);

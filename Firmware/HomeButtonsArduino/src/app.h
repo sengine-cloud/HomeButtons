@@ -248,6 +248,10 @@ class App : public AppStateMachine, public Logger {
   bool _clock_fresh() const;
   // Seconds until the next boundary, into flags().schedule_wakeup_time.
   void _schedule_next_wake();
+  // Reads /build.txt out of the SPIFFS image. Empty when the file is
+  // missing, which means the filesystem predates build stamping or was
+  // never flashed.
+  void _read_spiffs_build();
   void _refresh_counter_labels();
   void _flush_pending();
 
@@ -304,6 +308,7 @@ class App : public AppStateMachine, public Logger {
   // task, which owns webhook_.
   std::atomic<bool> net_connected_event_{false};
   SemaphoreHandle_t state_mutex_ = nullptr;
+  BuildIdType spiffs_build_;
 
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;

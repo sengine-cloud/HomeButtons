@@ -54,6 +54,7 @@ size_t Webhook::_build_body(char* out, size_t out_size, const Event& event,
   doc["battery_pct"] = device_state_.sensors().battery_pct;
   doc["battery_v"] = device_state_.sensors().battery_voltage;
   doc["sw_version"] = SW_VERSION;
+  doc["build"] = BUILD_ID;
   return serializeJson(doc, out, out_size);
 }
 

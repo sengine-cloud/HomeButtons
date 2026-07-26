@@ -43,6 +43,7 @@ the setup portal to use one.
 """
 import os
 import shutil
+import subprocess
 import struct
 import subprocess
 import sys
@@ -226,6 +227,25 @@ def read_icon_list():
     return names
 
 
+def build_id():
+    """Same value pre_script.py compiles into the firmware, so a device can
+    report whether its filesystem and its code came from one commit."""
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    try:
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            stderr=subprocess.DEVNULL, cwd=root).decode().strip()
+    except Exception:
+        return "nogit"
+    try:
+        dirty = subprocess.call(
+            ["git", "diff", "--quiet", "--ignore-submodules", "HEAD"],
+            stderr=subprocess.DEVNULL, cwd=root) != 0
+    except Exception:
+        dirty = False
+    return sha + ("+dirty" if dirty else "")
+
+
 def main():
     extra = read_icon_list()
     extra += [n.strip() for n in sys.argv[1:] if n.strip()]
@@ -250,6 +270,12 @@ def main():
         for name in extra:
             n = render_icon(name, size, out_dir, exe)
             print("rendered %s/%s.bmp (%d bytes)" % (out_dir, name, n))
+
+    stamp = os.path.abspath(os.path.join(OUT_ROOT, "..", "build.txt"))
+    os.makedirs(os.path.dirname(stamp), exist_ok=True)
+    with open(stamp, "w") as fh:
+        fh.write(build_id() + "\n")
+    print("stamped %s with %s" % (stamp, build_id()))
 
 
 if __name__ == "__main__":

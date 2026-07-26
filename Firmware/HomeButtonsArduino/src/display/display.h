@@ -44,6 +44,11 @@ class DeviceState;
 class Display : public Logger {
  public:
   enum class State { IDLE, ACTIVE, CMD_END, ENDING };
+  // Build stamp read out of the SPIFFS image. Shown on the Device Info
+  // screen next to the firmware's own, so a mismatch is visible on the
+  // device rather than only in the serial log.
+  void set_spiffs_build(const char* build) { spiffs_build_ = build; }
+
   explicit Display(DeviceState& device_state)
       : Logger("Display"), device_state_(device_state) {}
   void begin(HardwareDefinition& HW);
@@ -78,6 +83,7 @@ class Display : public Logger {
   bool new_ui_cmd = false;
   bool redraw_in_progress = false;
   bool spiffs_mounted_ = false;
+  StaticString<BUILD_ID_MAXLEN> spiffs_build_;
 
   uint16_t text_color = GxEPD_BLACK;
   uint16_t bg_color = GxEPD_WHITE;

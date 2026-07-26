@@ -24,6 +24,16 @@
 // ------ device ------
 static constexpr char MANUFACTURER[] = "PLab";
 static constexpr char SW_VERSION[] = "v3.0.0-counter.1";
+// Short commit sha, injected by pre_script.py and suffixed "+dirty" when
+// built from a modified tree. The SPIFFS image carries the same value in
+// /build.txt, so a device can report whether its code and its filesystem
+// came from the same commit - the two are flashed separately and drifting
+// apart is otherwise invisible.
+#ifndef BUILD_SHA
+#define BUILD_SHA "unknown"
+#endif
+static constexpr char BUILD_ID[] = BUILD_SHA;
+static constexpr size_t BUILD_ID_MAXLEN = 24;
 static constexpr char SW_MODEL_ID[] = "A1";  // must match the burnt eFuse
 
 // ------ URLs ------

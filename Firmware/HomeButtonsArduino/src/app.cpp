@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_task_wdt.h>
 #include <time.h>
+#include <SPIFFS.h>
 #include "esp_ota_ops.h"
 
 #include "config.h"
@@ -303,6 +304,25 @@ void App::_check_reset() {
        had_counts ? "" : " (already zero)");
 }
 
+void App::_read_spiffs_build() {
+  spiffs_build_ = "";
+  File f = SPIFFS.open("/build.txt", FILE_READ);
+  if (!f) {
+    warning("no /build.txt in SPIFFS - image predates build stamping");
+    return;
+  }
+  char buf[BUILD_ID_MAXLEN + 1] = {};
+  const size_t n = f.readBytes(buf, BUILD_ID_MAXLEN);
+  f.close();
+  for (size_t i = 0; i < n; i++) {
+    if (buf[i] == '\n' || buf[i] == '\r') {
+      buf[i] = '\0';
+      break;
+    }
+  }
+  spiffs_build_ = buf;
+}
+
 void App::_schedule_next_wake() {
   device_state_.flags().schedule_wakeup_time = 0;
   if (!device_state_.clock_valid()) return;
@@ -474,7 +494,7 @@ void App::_service_display() {
 void App::_main_task() {
   info("woke up.");
   info("cpu freq: %d MHz", getCpuFrequencyMhz());
-  info("SW version: %s", SW_VERSION);
+  info("SW version: %s, build %s", SW_VERSION, BUILD_ID);
 
   // ------ init hardware ------
   bool hw_init_ok = hw_.init();
@@ -502,6 +522,20 @@ void App::_main_task() {
   device_state_.load_all(hw_);
 
   _begin_hw();
+
+  // Display::begin() mounts SPIFFS, so the stamp is readable from here on.
+  _read_spiffs_build();
+  display_.set_spiffs_build(spiffs_build_.c_str());
+  if (spiffs_build_.empty()) {
+    warning("SPIFFS build unknown - reflash the filesystem image");
+  } else if (!(spiffs_build_ == BUILD_ID)) {
+    // Not fatal: the two images are flashed separately and a mismatch is
+    // usually just a forgotten uploadfs. Worth saying out loud though.
+    warning("build mismatch: firmware %s, SPIFFS %s", BUILD_ID,
+            spiffs_build_.c_str());
+  } else {
+    info("build %s (firmware and SPIFFS match)", BUILD_ID);
+  }
 
   // ------ after update handler ------
   if (device_state_.persisted().last_sw_ver != SW_VERSION) {

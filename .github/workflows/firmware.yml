@@ -26,6 +26,17 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # pre_script.py and make_icons.py stamp the short sha into the
+          # firmware and the SPIFFS image, so the checkout needs real git
+          # metadata rather than a detached blob.
+          fetch-depth: 0
+
+      # Artifact names carry the sha so successive downloads land as
+      # homebuttons-original-<sha>.zip instead of "firmware-original (3)".
+      - name: Build id
+        id: build_id
+        run: echo "sha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -119,6 +130,7 @@ jobs:
                ".pio/build/${ENV}/firmware.bin" \
                ".pio/build/${ENV}/spiffs.bin" \
                partitions.csv \
+               data/build.txt \
                "dist/${ENV}/"
             echo "--- dist/${ENV} ---"
             ls -l "dist/${ENV}"
@@ -126,7 +138,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-original
+          name: homebuttons-original-${{ steps.build_id.outputs.sha }}
           path: Firmware/HomeButtonsArduino/dist/original_release/
           if-no-files-found: error
 
@@ -134,6 +146,6 @@ jobs:
       # USB-C cable instead of the UART pins on the debug header.
       - uses: actions/upload-artifact@v4
         with:
-          name: firmware-original-debug
+          name: homebuttons-original-debug-${{ steps.build_id.outputs.sha }}
           path: Firmware/HomeButtonsArduino/dist/original_debug/
           if-no-files-found: error
