@@ -3,6 +3,7 @@
 #include "config.h"
 
 void DeviceState::save_user() {
+  NvsLock lock(nvs_mutex_);
   preferences_.begin("user", false);
   preferences_.putString("device_name", user_preferences_.device_name.c_str());
   for (int i = 0; i < NUM_BUTTONS; i++) {
@@ -33,6 +34,7 @@ void DeviceState::save_user() {
 }
 
 void DeviceState::load_user() {
+  NvsLock lock(nvs_mutex_);
   preferences_.begin("user", true);
   _load_to_static_string(
       user_preferences_.device_name, "device_name",
@@ -69,6 +71,7 @@ void DeviceState::load_user() {
 }
 
 void DeviceState::clear_user() {
+  NvsLock lock(nvs_mutex_);
   preferences_.begin("user", false);
   preferences_.clear();
   preferences_.end();
@@ -84,6 +87,7 @@ void DeviceState::clear_static_ip_config() {
 }
 
 void DeviceState::save_persisted() {
+  NvsLock lock(nvs_mutex_);
   preferences_.begin("persisted", false);
   preferences_.putBool("lb_mode", persisted_.low_batt_mode);
   preferences_.putBool("wifi_done", persisted_.wifi_done);
@@ -111,6 +115,7 @@ void DeviceState::save_persisted() {
 }
 
 void DeviceState::load_persisted() {
+  NvsLock lock(nvs_mutex_);
   // Read-only: upstream opened this namespace read-write on every boot.
   preferences_.begin("persisted", true);
   persisted_.low_batt_mode = preferences_.getBool("lb_mode", false);
@@ -141,6 +146,7 @@ void DeviceState::load_persisted() {
 }
 
 void DeviceState::clear_persisted() {
+  NvsLock lock(nvs_mutex_);
   preferences_.begin("persisted", false);
   preferences_.clear();
   preferences_.end();
@@ -174,12 +180,14 @@ void DeviceState::_load_factory(HardwareDefinition& hw) {
 }
 
 void DeviceState::save_all() {
+  NvsLock lock(nvs_mutex_);
   debug("state save all");
   save_user();
   save_persisted();
 }
 
 void DeviceState::load_all(HardwareDefinition& hw) {
+  NvsLock lock(nvs_mutex_);
   debug("state load all");
   _load_factory(hw);
   load_user();
@@ -189,12 +197,16 @@ void DeviceState::load_all(HardwareDefinition& hw) {
 }
 
 void DeviceState::clear_all() {
+  NvsLock lock(nvs_mutex_);
   debug("state clear all");
   clear_user();
   clear_persisted();
 }
 
-size_t DeviceState::get_free_entries() { return preferences_.freeEntries(); }
+size_t DeviceState::get_free_entries() {
+  NvsLock lock(nvs_mutex_);
+  return preferences_.freeEntries();
+}
 
 const ButtonLabel& DeviceState::get_btn_label(uint8_t i) const {
   static ButtonLabel noLabel;

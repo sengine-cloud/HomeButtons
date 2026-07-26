@@ -2,6 +2,8 @@
 #define HOMEBUTTONS_STATE_H
 
 #include <Preferences.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "config.h"
 #include "types.h"
@@ -99,7 +101,31 @@ class DeviceState : public Logger {
   } sensors_;
 
  public:
-  DeviceState() : Logger("State") {}
+  DeviceState() : Logger("State") {
+    // One Preferences handle serves every caller, and it is written from
+    // both the network task (on connect) and the main task (after a press
+    // or before sleep). Interleaved begin()/put()/end() on a single handle
+    // corrupts it, and the Wi-Fi quick-connect settings live in that
+    // namespace - so the failure shows up as Wi-Fi that works only
+    // sometimes. Guard every access at the source rather than expecting
+    // each call site to remember.
+    nvs_mutex_ = xSemaphoreCreateRecursiveMutex();
+  }
+
+  // Scoped hold of the NVS handle.
+  class NvsLock {
+   public:
+    explicit NvsLock(SemaphoreHandle_t m) : m_(m) {
+      if (m_ != nullptr) xSemaphoreTakeRecursive(m_, portMAX_DELAY);
+    }
+    ~NvsLock() {
+      if (m_ != nullptr) xSemaphoreGiveRecursive(m_);
+    }
+    NvsLock(const NvsLock&) = delete;
+
+   private:
+    SemaphoreHandle_t m_;
+  };
   DeviceState(const DeviceState&) = delete;
 
   // Factory
@@ -278,6 +304,7 @@ class DeviceState : public Logger {
                            const char* defaultValue);
 
   Preferences preferences_;
+  SemaphoreHandle_t nvs_mutex_ = nullptr;
   StaticString<15> ip_address_;
   APPasswordType ap_password_;
 };
