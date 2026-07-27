@@ -9,3 +9,30 @@ CONFIG_ARDUHAL_LOG_DEFAULT_LEVEL_DEBUG=y
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS=y
 CONFIG_FREERTOS_RUN_TIME_STATS_USING_ESP_TIMER=y
+
+# DO NOT set CONFIG_ESP_CONSOLE_USB_CDC=y here. It hangs the device.
+#
+# esp_system/Kconfig declares:
+#     config ESP_CONSOLE_USB_CDC
+#         depends on (IDF_TARGET_ESP32S2 || IDF_TARGET_ESP32S3) && !TINY_USB
+# with the comment "the ROM CDC driver is currently incompatible with
+# TinyUSB". This project builds framework = arduino, espidf, and Arduino
+# pulls TinyUSB in (CONFIG_TINYUSB_CDC_ENABLED=y), so that dependency
+# cannot be satisfied here.
+#
+# Forcing the symbol from a defaults file overrides the unmet dependency
+# instead of failing: the build succeeds and the symbol really is set in
+# the generated sdkconfig, so it looks verified. On the device the ROM CDC
+# console and TinyUSB then both drive the same USB OTG peripheral. It
+# hangs at boot and enumerates as 303a:0002 without answering esptool,
+# and has to be recovered by holding BOOT, tapping RST, and flashing with
+# `--before no_reset`.
+#
+# The console therefore stays on UART0 for both builds - read it from TX
+# and GND on the CMSIS-DAP header.
+#
+# If USB logging is wanted, the supported route on this project is
+# Arduino's own stack rather than the IDF console: build with
+# -DARDUINO_USB_CDC_ON_BOOT=1 and call Serial.setDebugOutput(true) early
+# so esp_log output is redirected into Arduino's TinyUSB CDC, leaving one
+# owner of the peripheral. Untested on hardware here.

@@ -26,7 +26,7 @@ def merge_fw(fw_zip_path: str, out_path: str, spiffs_img_path: str = None):
         partitions = load_partition_table(
             os.path.join(tmp_dir, "partitions.csv"))
 
-        tokens = ["esptool.py", "--chip", "ESP32-S2", "merge_bin", "-o", out_path,
+        tokens = ["esptool", "--chip", "ESP32-S2", "merge-bin", "-o", out_path,
                   "0x1000", os.path.join(tmp_dir, "bootloader.bin"),
                   "0x8000", os.path.join(tmp_dir, "partitions.bin"),
                   partitions["otadata"]["Offset"], os.path.join(

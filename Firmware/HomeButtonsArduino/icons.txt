@@ -1,0 +1,21 @@
+# Material Design Icons baked into the SPIFFS image.
+#
+# One name per line. Browse and search names at:
+#     https://pictogrammers.com/library/mdi/
+# Use the name exactly as shown there - lowercase and hyphenated.
+#
+# These are fetched at BUILD time by tools/make_icons.py and flashed into
+# SPIFFS; the device never downloads anything at runtime. CI reads this
+# file too, so anything listed here ends up in the published artifacts.
+#
+# A name that does not exist fails the build rather than turning into a
+# placeholder glyph you would only notice on the device.
+#
+# `plus` and `minus` are drawn locally by the script and are always
+# present - no need to list them.
+#
+# Reference one from a button label as `mdi:food-drumstick`, or
+# `mdi:food-drumstick Wings` for icon plus text.
+
+food-drumstick
+dog-service

@@ -23,6 +23,15 @@ CONFIG_SPIFFS_OBJ_NAME_LEN=56
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_PEER_CERT=y
 CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
-CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+# Deliberately NOT enabling MBEDTLS_DYNAMIC_FREE_CA_CERT: the webhook client
+# keeps the TLS session open across a burst of presses, and freeing the CA
+# after the first handshake would break the reconnect path.
+
+# Root CA bundle for the webhook endpoint. The backend sits behind
+# Cloudflare, which rotates edge issuers, so a single pinned root is not
+# viable. CMN carries the common roots (ISRG, Google Trust Services,
+# DigiCert) at roughly a third of the flash cost of the full bundle.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
 
 CONFIG_EFUSE_CUSTOM_TABLE=y

@@ -2,12 +2,11 @@
 
 #include <Arduino.h>
 #include <esp_task_wdt.h>
+#include <time.h>
 #include <SPIFFS.h>
 #include "esp_ota_ops.h"
-#include <ArduinoJson.h>
 
 #include "config.h"
-#include "factory.h"
 #include "hardware.h"
 
 extern "C" bool verifyRollbackLater() { return true; };
@@ -15,7 +14,6 @@ extern "C" bool verifyRollbackLater() { return true; };
 App::App()
     : AppStateMachine("AppSM", *this),
       Logger("APP"),
-#if defined(HOME_BUTTONS_ORIGINAL)
       b1_("B1", 1, false, true, hw_),
       b2_("B2", 2, false, true, hw_),
       b3_("B3", 3, false, true, hw_),
@@ -25,34 +23,19 @@ App::App()
       bsl_input_("BSLInput",
                  std::array<std::reference_wrapper<BtnSwLED>, NUM_BUTTONS>{
                      b1_, b2_, b3_, b4_, b5_, b6_}),
-#elif defined(HOME_BUTTONS_MINI)
-      b1_("B1", 1, false, true, hw_),
-      b2_("B2", 2, false, true, hw_),
-      b3_("B3", 3, false, true, hw_),
-      b4_("B4", 4, false, true, hw_),
-      bsl_input_("BSLInput",
-                 std::array<std::reference_wrapper<BtnSwLED>, NUM_BUTTONS>{
-                     b1_, b2_, b3_, b4_}),
-#elif defined(HOME_BUTTONS_PRO)
-      touch_handler_(hw_),
-#elif defined(HOME_BUTTONS_INDUSTRIAL)
-      b1_("B1", 1, false, true, hw_),
-      b2_("B2", 2, false, true, hw_),
-      b3_("B3", 3, false, true, hw_),
-      b4_("B4", 4, false, true, hw_),
-      sw_("SW", 5, true, false, hw_),
-      bsl_input_("BSLInput",
-                 std::array<std::reference_wrapper<BtnSwLED>, NUM_BUTTONS>{
-                     b1_, b2_, b3_, b4_, sw_}),
+      display_(device_state_),
+      network_(device_state_),
+      webhook_(device_state_),
+      setup_(*this)
+#ifdef HOME_BUTTONS_DEBUG
+      ,
+      console_(*this)
 #endif
-#if defined(HAS_DISPLAY)
-      mdi_(device_state_),
-      display_(device_state_, mdi_),
-#endif
-      topics_(device_state_),
-      network_(device_state_, topics_),
-      mqtt_(device_state_, bsl_input_, network_, topics_),
-      setup_(*this) {
+{
+  press_queue_ = xQueueCreate(PRESS_QUEUE_SIZE, sizeof(PressQueueElement));
+  if (press_queue_ == nullptr) error("failed to create press queue");
+  state_mutex_ = xSemaphoreCreateRecursiveMutex();
+  if (state_mutex_ == nullptr) error("failed to create state mutex");
 }
 
 void App::setup() {
@@ -71,76 +54,74 @@ void App::setup() {
 
 void App::_sleep_or_restart() {
   delay(3000);
-#if defined(HAS_SLEEP_MODE)
   error("Going to sleep...");
+  // Even a failure sleep should wake for the reset rather than falling back
+  // to the heartbeat interval.
+  _schedule_next_wake();
   _start_esp_sleep();
-#else
-  error("Restarting...");
-  ESP.restart();
-#endif
 }
 
-#if defined(HAS_SLEEP_MODE)
 void App::_start_esp_sleep() {
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
   esp_sleep_enable_ext1_wakeup(hw_.WAKE_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
-  if (device_state_.persisted().wifi_done &&
+  if (forced_wake_seconds_ > 0) {
+    // Console override, deliberately outside the conditions below. The
+    // states those exclude - low battery, check_connection - are exactly
+    // the ones worth debugging over serial, and the console reports a wake
+    // time it must therefore actually arm. Sleeping there with no timer
+    // leaves the device recoverable only by hand, which is what the
+    // override exists to avoid.
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(forced_wake_seconds_) *
+                                  1000000ULL);
+  } else if (device_state_.persisted().wifi_done &&
       device_state_.persisted().setup_done &&
       !device_state_.persisted().low_batt_mode &&
       !device_state_.persisted().check_connection) {
     if (device_state_.flags().schedule_wakeup_time > 0) {
       esp_sleep_enable_timer_wakeup(device_state_.flags().schedule_wakeup_time *
-                                    1000000UL);
+                                    1000000ULL);
     } else {
-      esp_sleep_enable_timer_wakeup(device_state_.sensor_interval() *
-                                    60000000UL);
+      esp_sleep_enable_timer_wakeup(
+          static_cast<uint64_t>(device_state_.heartbeat_interval()) *
+          60000000ULL);
     }
   }
-#elif defined(HOME_BUTTONS_PRO)
-  esp_sleep_enable_ext1_wakeup(hw_.WAKE_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
-#endif
   info("deep sleep... z z z");
   esp_deep_sleep_start();
 }
 
 void App::_go_to_sleep() {
+  _schedule_next_wake();
   device_state_.save_all();
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
   hw_.set_all_leds(0);
-#elif defined(HOME_BUTTONS_PRO)
-  hw_.set_frontlight(0);
-#endif
   _start_esp_sleep();
 }
-#endif
 
 std::pair<BootCause, int16_t> App::_determine_boot_cause() {
   BootCause boot_cause = BootCause::RESET;
-  int16_t wakeup_pin = 0;
   uint8_t wakeup_btn_id = 0;
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
   switch (esp_sleep_get_wakeup_cause()) {
     case ESP_SLEEP_WAKEUP_EXT1: {
-      uint64_t GPIO_reason = esp_sleep_get_ext1_wakeup_status();
-      wakeup_pin = (log(GPIO_reason)) / log(2);
-      debug("wakeup cause: PIN %d", wakeup_pin);
+      uint64_t gpio_reason = esp_sleep_get_ext1_wakeup_status();
+      if (gpio_reason == 0) {
+        debug("EXT1 wakeup with empty status");
+        break;
+      }
+      // Lowest set bit is the pin. Upstream used log(x)/log(2) on floats,
+      // which yields a nonsense pin when two buttons are held at wake and
+      // is undefined for a zero mask.
+      int wakeup_pin = __builtin_ctzll(gpio_reason);
+      debug("wakeup cause: PIN %d (mask 0x%llx)", wakeup_pin, gpio_reason);
       wakeup_btn_id = bsl_input_.IdFromPin(wakeup_pin);
       if (wakeup_btn_id > 0) {
         boot_cause = BootCause::BUTTON;
-      } else {
-        boot_cause = BootCause::RESET;
       }
     } break;
     case ESP_SLEEP_WAKEUP_TIMER:
       boot_cause = BootCause::TIMER;
       break;
     default:
-      boot_cause = BootCause::RESET;
       break;
   }
-#elif defined(HOME_BUTTONS_PRO) || defined(HOME_BUTTONS_INDUSTRIAL)
-  boot_cause = BootCause::RESET;
-#endif
   return std::make_pair(boot_cause, wakeup_btn_id);
 }
 
@@ -149,78 +130,35 @@ void App::_log_task_stats() {
   TaskStatus_t statusArray[maxTasks];
   uint32_t totalRunTime;
 
-  // Fetch the status of tasks
   UBaseType_t numTasks =
       uxTaskGetSystemState(statusArray, maxTasks, &totalRunTime);
 
-  // Print task stats
   debug("#### Task Stats ####");
-  debug("%-15s%10s%10s%10s%10s%10s", "Task Name", "State", "Prio", "Stack",
-        "Num", "Time %");
   for (UBaseType_t i = 0; i < numTasks; i++) {
     TaskStatus_t* taskStatus = &statusArray[i];
 
-    // Calculate task run time as a percentage
     float runTimePercentage = 0.0;
     if (totalRunTime > 0) {
       runTimePercentage =
           (taskStatus->ulRunTimeCounter / (float)totalRunTime) * 100;
     }
 
-    char buffer[128];
-    sprintf(buffer, "%-15s%10d%10d%10d%10d%10.2f", taskStatus->pcTaskName,
-            taskStatus->eCurrentState, taskStatus->uxCurrentPriority,
-            taskStatus->usStackHighWaterMark, (int)taskStatus->xTaskNumber,
-            runTimePercentage);
-    debug(buffer);
+    // Task name is an argument, never the format string: upstream passed a
+    // formatted buffer straight to debug(), so a '%' in a task name would
+    // have been interpreted as a conversion.
+    debug("%-15s%10d%10d%10d%10d%10.2f", taskStatus->pcTaskName,
+          taskStatus->eCurrentState, taskStatus->uxCurrentPriority,
+          taskStatus->usStackHighWaterMark, (int)taskStatus->xTaskNumber,
+          runTimePercentage);
   }
-  uint32_t esp_free_heap = ESP.getFreeHeap();
-  uint32_t esp_min_free_heap = ESP.getMinFreeHeap();
-  uint32_t rtos_free_heap = xPortGetFreeHeapSize();
-  debug("Free heap: ESP %d, ESP MIN %d, RTOS %d\n", esp_free_heap,
-        esp_min_free_heap, rtos_free_heap);
-}
-
-void App::_publish_system_state() {
-  uint32_t esp_free_heap = ESP.getFreeHeap();
-  uint32_t esp_min_free_heap = ESP.getMinFreeHeap();
-  uint32_t uptime = millis() / 1000;
-  int32_t rssi = network_.get_rssi();
-  IPAddress ip = network_.get_ip();
-
-  StaticJsonDocument<512> doc;
-  doc["esp_free_heap"] = esp_free_heap;
-  doc["esp_min_free_heap"] = esp_min_free_heap;
-  doc["uptime_seconds"] = uptime;
-  doc["wifi_rssi"] = rssi;
-  doc["ip_address"] = ip.toString();
-  doc["sw_version"] = SW_VERSION;
-#if defined(HAS_BATTERY)
-  doc["batt_voltage"] = hw_.read_battery_voltage();
-#endif
-
-  char buffer[512];
-  serializeJson(doc, buffer, sizeof(buffer));
-  network_.publish(topics_.t_system_state(), buffer, true);
+  debug("Free heap: ESP %d, ESP MIN %d, RTOS %d", ESP.getFreeHeap(),
+        ESP.getMinFreeHeap(), xPortGetFreeHeapSize());
 }
 
 void App::_ui_task(void* param) {
   App* app = static_cast<App*>(param);
   while (true) {
-#if defined(HAS_BUTTON_UI)
     app->bsl_input_.Loop();
-#elif defined(HAS_TOUCH_UI)
-    app->touch_handler_.Loop();
-#endif
-
-#if defined(HAS_FRONTLIGHT)
-    if (millis() - app->device_state_.flags().last_user_input_time >
-        FRONTLIGHT_TIMEOUT) {
-      if (!app->device_state_.flags().keep_frontlight_on) {
-        app->hw_.set_frontlight(0);
-      }
-    }
-#endif
     delay(5);
   }
 }
@@ -228,18 +166,15 @@ void App::_ui_task(void* param) {
 void App::_start_ui_task() {
   if (ui_task_h_ != nullptr) return;
   debug("UI task started.");
-  xTaskCreate(
-      _ui_task,  // Function that should be called
-      "UI",      // Name of the task (for debugging)
-      10000,     // Stack size (bytes)
-      this,      // Parameter to pass
-      23,        // Task priority, using same as wifi driver:
-           // https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/performance/speed.html
-      &ui_task_h_  // Task handle
+  xTaskCreate(_ui_task,    // Function that should be called
+              "UI",        // Name of the task (for debugging)
+              10000,       // Stack size (bytes)
+              this,        // Parameter to pass
+              23,          // Task priority, same as the wifi driver
+              &ui_task_h_  // Task handle
   );
 }
 
-#if defined(HAS_DISPLAY)
 void App::_display_task(void* param) {
   App* app = static_cast<App*>(param);
   while (true) {
@@ -250,7 +185,7 @@ void App::_display_task(void* param) {
 
 void App::_start_display_task() {
   if (display_task_h_ != nullptr) return;
-  debug("m_display task started.");
+  debug("display task started.");
   xTaskCreate(_display_task,    // Function that should be called
               "DISPLAY",        // Name of the task (for debugging)
               5000,             // Stack size (bytes)
@@ -259,7 +194,6 @@ void App::_start_display_task() {
               &display_task_h_  // Task handle
   );
 }
-#endif
 
 void App::_network_task(void* param) {
   App* app = static_cast<App*>(param);
@@ -283,49 +217,387 @@ void App::_start_network_task() {
 }
 
 void App::_begin_hw() {
-#if defined(HAS_DISPLAY)
-  // must be before ledAttachPin (reserves GPIO37 = SPIDQS)
+  // must be before ledAttachPin (reserves GPIO37 = SPIDQS).
+  // Display::begin() also mounts SPIFFS, which is where the pre-flashed
+  // icons live.
   display_.begin(hw_);
-#endif
   hw_.begin();
-#if defined(HAS_BUTTON_UI)
   bsl_input_.Init();
   bsl_input_.LEDSetDefaultBrightnessAll(LED_DFLT_BRIGHT);
-#elif defined(HAS_TOUCH_UI)
-  touch_handler_.Init(hw_.TOUCH_CLICK_PIN, hw_.TOUCH_INT_PIN);
-#endif
-
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  // set button config based
-  auto conf = device_state_.user_preferences().btn_conf_string;
-  debug("Button config: %s", conf.c_str());
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    if (conf[i] == 'S') {
-      bsl_input_.SetSwitchMode(i + 1, true);
-    }
-  }
-  sw_.SetSwitchMode(true);
-#endif
 }
 
 void App::_start_tasks() {
   _start_ui_task();
   _start_network_task();
-#if defined(HAS_DISPLAY)
   _start_display_task();
-#endif
-
-#if defined(HAS_BUTTON_UI)
   bsl_input_.Start();
-#elif defined(HAS_TOUCH_UI)
-  touch_handler_.Start();
+}
+
+// ---------------------------------------------------------------------------
+// Counter plumbing
+// ---------------------------------------------------------------------------
+
+bool App::_btn_to_counter(uint8_t btn_id, uint8_t& idx, int32_t& delta) {
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    if (btn_id == BTN_COUNTER_INC[i]) {
+      idx = i;
+      delta = 1;
+      return true;
+    }
+    if (btn_id == BTN_COUNTER_DEC[i]) {
+      idx = i;
+      delta = -1;
+      return true;
+    }
+  }
+  return false;  // title buttons and anything unmapped
+}
+
+void App::_refresh_counter_labels() {
+  // Middle row only. The title above says what the counter is and the minus
+  // below is a fixed glyph, so both stay exactly as configured in the
+  // portal - only the number is owned by the firmware.
+  for (uint8_t i = 0; i < NUM_COUNTERS; i++) {
+    device_state_.set_btn_label(
+        BTN_COUNTER_INC[i],
+        ButtonLabel("%ld", static_cast<long>(device_state_.counter(i)))
+            .c_str());
+  }
+}
+
+reset_schedule::Spec App::_reset_spec() {
+  bool ok = false;
+  const reset_schedule::Spec spec =
+      reset_schedule::parse(device_state_.reset_spec().c_str(), &ok);
+  if (!ok) {
+    warning("reset spec '%s' not understood, using %s",
+            device_state_.reset_spec().c_str(),
+            reset_schedule::mode_name(spec.mode));
+  }
+  return spec;
+}
+
+bool App::_clock_fresh() const {
+  if (!device_state_.clock_valid()) return false;
+  const time_t now = time(nullptr);
+  const time_t synced = static_cast<time_t>(device_state_.last_time_sync());
+  // Drift on the internal RC oscillator is fine for hours and meaningless
+  // after days, so refuse to act on a clock that old.
+  return now >= synced &&
+         (now - synced) <= static_cast<time_t>(CLOCK_STALE_SECONDS);
+}
+
+void App::_check_reset() {
+  if (!_clock_fresh()) return;
+  StateLock lock(state_mutex_);
+
+  const reset_schedule::Spec spec = _reset_spec();
+  if (spec.mode == reset_schedule::Mode::kOff) return;
+
+  const time_t local =
+      time(nullptr) + static_cast<time_t>(device_state_.tz_offset());
+  const int32_t period = reset_schedule::period_of(spec, local);
+  const int32_t last = device_state_.last_reset_period();
+
+  // The rule itself lives in reset_schedule so it can be unit-tested; this
+  // function only carries it out.
+  switch (reset_schedule::decide(last, period)) {
+    case reset_schedule::Action::kNone:
+      return;
+    case reset_schedule::Action::kAdopt:
+      device_state_.set_last_reset_period(period);
+      return;
+    case reset_schedule::Action::kHold:
+      info("local time moved back (period %d -> %d), keeping %d", last, period,
+           last);
+      return;
+    case reset_schedule::Action::kClear:
+      break;
+  }
+
+  const bool had_counts = device_state_.clear_counters();
+  device_state_.set_last_reset_period(period);
+  _refresh_counter_labels();
+  device_state_.flags().display_redraw = true;
+  reset_to_report_ = true;
+  info("reset boundary crossed (%s, period %d -> %d), counters cleared%s",
+       reset_schedule::mode_name(spec.mode), last, period,
+       had_counts ? "" : " (already zero)");
+}
+
+void App::_read_spiffs_build() {
+  spiffs_build_ = "";
+  File f = SPIFFS.open("/build.txt", FILE_READ);
+  if (!f) {
+    warning("no /build.txt in SPIFFS - image predates build stamping");
+    return;
+  }
+  char buf[BUILD_ID_MAXLEN + 1] = {};
+  const size_t n = f.readBytes(buf, BUILD_ID_MAXLEN);
+  f.close();
+  for (size_t i = 0; i < n; i++) {
+    if (buf[i] == '\n' || buf[i] == '\r') {
+      buf[i] = '\0';
+      break;
+    }
+  }
+  spiffs_build_ = buf;
+}
+
+void App::_schedule_next_wake() {
+  device_state_.flags().schedule_wakeup_time = 0;
+
+  if (forced_wake_seconds_ > 0) {
+    device_state_.flags().schedule_wakeup_time = forced_wake_seconds_;
+    info("forced wake in %u s", forced_wake_seconds_);
+    return;
+  }
+
+  // Same test _check_reset() uses, not the weaker clock_valid(). A reset
+  // that has been suspended for want of a trustworthy clock must not still
+  // schedule a wake off that clock: after a hard reset, system time is back
+  // at 1970 while last_time_sync is a real epoch, and the arithmetic below
+  // produced a plausible-looking seven hour sleep from it.
+  //
+  // Falling through to zero here means the heartbeat interval is used
+  // instead, and the heartbeat is what re-syncs the clock.
+  if (!_clock_fresh()) return;
+
+  const reset_schedule::Spec spec = _reset_spec();
+  if (spec.mode == reset_schedule::Mode::kOff) return;
+
+  const time_t local =
+      time(nullptr) + static_cast<time_t>(device_state_.tz_offset());
+  const uint32_t secs = reset_schedule::seconds_until_next(spec, local);
+  device_state_.flags().schedule_wakeup_time = secs;
+  info("next reset wake in %u s (%s)", secs,
+       reset_schedule::mode_name(spec.mode));
+}
+
+// Runs on the UI task. RAM only: no NVS write, no HTTP.
+void App::_handle_counter_press(uint8_t btn_id) {
+  StateLock lock(state_mutex_);
+  // Before anything else: a press just after a boundary belongs to the new
+  // period, not the one that ended. The clock survives deep sleep, so this
+  // is knowable without the network.
+  _check_reset();
+
+  uint8_t idx = 0;
+  int32_t delta = 0;
+  if (!_btn_to_counter(btn_id, idx, delta)) {
+    debug("button %u is not assigned to a counter", btn_id);
+    // Two quick blinks: registered, but nothing is bound to this button.
+    bsl_input_.LEDBlink(btn_id, 2, 0, 0, 0, false);
+    return;
+  }
+
+  int32_t count = device_state_.adjust_counter(idx, delta);
+  info("counter %s %+ld -> %ld", COUNTER_NAMES[idx], static_cast<long>(delta),
+       static_cast<long>(count));
+
+  _refresh_counter_labels();
+  device_state_.flags().display_redraw = true;
+
+  // Solid while the press is in flight. _flush_pending() clears it once
+  // every press on this button has been delivered, so the LED reports
+  // delivery rather than merely "the device is awake".
+  if (inflight_[btn_id - 1].fetch_add(1) == 0) {
+    send_failed_[btn_id - 1] = false;  // start of a fresh burst
+  }
+  bsl_input_.LEDOn(btn_id);
+
+  PressQueueElement element{};
+  element.event.counter_idx = idx;
+  element.event.button_id = btn_id;
+  element.event.delta = delta;
+  element.event.count = count;
+  element.event.seq = device_state_.next_seq();
+  element.queued_at = millis();
+
+  if (press_queue_ == nullptr ||
+      xQueueSend(press_queue_, &element, (TickType_t)0) != pdTRUE) {
+    // The counter and the display already moved; only the notification is
+    // lost. The next delivered press carries the corrected absolute count.
+    error("press queue full, event for counter %s not sent",
+          COUNTER_NAMES[idx]);
+    send_failed_[btn_id - 1] = true;
+    if (inflight_[btn_id - 1].fetch_sub(1) == 1) {
+      bsl_input_.LEDBlink(btn_id, 3, 0, 0, 0, false);
+    }
+  }
+}
+
+// Runs on the main task. Owns the NVS write and the POST.
+void App::_flush_pending() {
+  if (press_queue_ == nullptr) return;
+  if (uxQueueMessagesWaiting(press_queue_) == 0) return;
+  if (network_.get_state() != Network::State::W_CONNECTED) return;
+
+  {
+    // One NVS write covers however many presses are waiting.
+    StateLock lock(state_mutex_);
+    device_state_.save_all();
+  }
+
+  PressQueueElement element;
+  while (xQueueReceive(press_queue_, &element, 0) == pdTRUE) {
+    element.event.age_ms = millis() - element.queued_at;
+    const uint8_t btn = element.event.button_id;
+    if (!webhook_.send_press(element.event)) {
+      warning("failed to deliver press seq %u", element.event.seq);
+      if (btn >= 1 && btn <= NUM_BUTTONS) send_failed_[btn - 1] = true;
+    }
+    // Only release the LED once nothing is left in flight for this button:
+    // a press that lands while a later one is still queued must not take
+    // the light out from under it.
+    if (btn >= 1 && btn <= NUM_BUTTONS &&
+        inflight_[btn - 1].fetch_sub(1) == 1) {
+      if (send_failed_[btn - 1]) {
+        // Three fast blinks, then dark. Distinguishable from the solid
+        // in-flight state and from the two-blink unassigned pattern.
+        bsl_input_.LEDBlink(btn, 3, 0, 0, 0, false);
+      } else {
+        bsl_input_.LEDOff(btn);
+      }
+    }
+    esp_task_wdt_reset();
+  }
+}
+
+void App::_net_on_connect() {
+  // NETWORK task. Deliberately does nothing but raise a flag: webhook_ owns
+  // one HTTPClient and one WiFiClientSecure, and _flush_pending() drives
+  // them from the main task. Posting from here would put two tasks on the
+  // same TLS connection - reachable on any connect with a queued press,
+  // because Network reports W_CONNECTED one state before this fires.
+  net_connected_event_ = true;
+}
+
+// MAIN task. Sole owner of webhook_.
+void App::_service_webhook() {
+  // The network state only flips to DISCONNECTED once the network task
+  // gets round to it, so W_CONNECTED stays true for a few ms after the
+  // shutdown path has commanded the link down - long enough to start a
+  // POST that cannot possibly succeed.
+  if (shutting_down_) return;
+  if (network_.get_state() != Network::State::W_CONNECTED) return;
+
+  if (net_connected_event_.exchange(false)) {
+    webhook_.begin();
+
+    const bool have_presses =
+        press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
+    const time_t now = time(nullptr);
+    // !_clock_fresh() rather than !clock_valid(): after a hard reset system
+    // time is back at 1970 while last_time_sync still holds a real epoch,
+    // which makes the subtraction below a large negative number - never
+    // greater than the resync interval, so the device would decide its
+    // clock was current and never ask for the time again.
+    const bool clock_old =
+        !_clock_fresh() ||
+        (now - static_cast<time_t>(device_state_.last_time_sync())) >
+            static_cast<time_t>(CLOCK_RESYNC_SECONDS);
+
+    if (boot_cause_ == BootCause::TIMER) {
+      webhook_.send_heartbeat();
+    } else if (!have_presses && clock_old) {
+      // Every response carries the clock, so a bare sync is only worth
+      // sending when nothing else is going out anyway.
+      webhook_.sync_time();
+    }
+    // An unreachable receiver costs HTTP_MAX_ATTEMPTS * HTTP_TIMEOUT plus
+    // backoff per send, and a heartbeat followed by a reset report is two
+    // of those - enough to pass WDT_TIMEOUT without this.
+    esp_task_wdt_reset();
+
+    // The clock may only just have become valid, so re-test the boundary
+    // now that it has.
+    _check_reset();
+  }
+
+  if (reset_to_report_.load()) {
+    if (webhook_.send_reset(reset_schedule::mode_name(_reset_spec().mode))) {
+      reset_to_report_ = false;
+    }
+    esp_task_wdt_reset();
+  }
+
+  _flush_pending();
+}
+
+void App::_handle_ui_event_global(UserInput::Event event) {
+  device_state_.flags().last_user_input_time = millis();
+}
+
+void App::_service_console() {
+#ifdef HOME_BUTTONS_DEBUG
+  console_.service();
 #endif
+}
+
+bool App::_webhook_pending() const {
+  // The connect event counts as outstanding work: it is what triggers the
+  // heartbeat and the time sync, and the network task raises it a little
+  // after the link comes up.
+  if (net_connected_event_.load()) return true;
+  if (reset_to_report_.load()) return true;
+  return press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
+}
+
+void App::_service_reset() {
+  if (millis() - last_reset_check_ < RESET_CHECK_INTERVAL) return;
+  last_reset_check_ = millis();
+
+  const int32_t before = device_state_.last_reset_period();
+  _check_reset();
+  if (device_state_.last_reset_period() == before) return;
+
+  // Only on an actual crossing: _schedule_next_wake() logs, and this runs
+  // for as long as the device stays awake.
+  _schedule_next_wake();
+  // And persist. Every other caller of _check_reset() is followed by a save
+  // - _flush_pending() after a press, _go_to_sleep() on the way down - but
+  // a device left awake crosses the boundary with nobody around to press
+  // anything. Without this, the receiver is told the counters are zero
+  // while NVS still holds yesterday's values, and the next boot clears and
+  // reports a second time for the same boundary.
+  StateLock lock(state_mutex_);
+  device_state_.save_all();
+}
+
+void App::_console_press(uint8_t btn_id) {
+  _handle_counter_press(btn_id);
+  device_state_.flags().last_user_input_time = millis();
+  // Keeps an open session open, mirroring SessionState::handle_ui_event().
+  session_last_input_time_ = millis();
+
+  // Deliberately not transitioning from here. The state machine is
+  // unsynchronised and the UI task drives it too, so a second concurrent
+  // transition source would let a console press racing a real one run
+  // exit()/entry() twice - re-binding the button callback and restarting a
+  // connect already in flight. SleepModeHandleInput::loop() picks this up
+  // instead, on the main task, where its own timeout transition already
+  // happens.
+  console_press_pending_ = true;
+}
+
+void App::_service_display() {
+  if (!device_state_.flags().display_redraw) return;
+  // Coalesce a burst so a run of presses does not queue up a full e-paper
+  // refresh each. The timestamp only moves when something is actually
+  // drawn, so the first press after an idle spell redraws straight away
+  // rather than waiting out an interval that has been ticking in the
+  // background.
+  if (millis() - last_m_display_redraw_ < AWAKE_REDRAW_INTERVAL) return;
+  device_state_.flags().display_redraw = false;
+  last_m_display_redraw_ = millis();
+  display_.disp_main();
 }
 
 void App::_main_task() {
   info("woke up.");
   info("cpu freq: %d MHz", getCpuFrequencyMhz());
-  info("SW version: %s", SW_VERSION);
+  info("SW version: %s, build %s", SW_VERSION, BUILD_ID);
 
   // ------ init hardware ------
   bool hw_init_ok = hw_.init();
@@ -352,48 +624,27 @@ void App::_main_task() {
 
   device_state_.load_all(hw_);
 
-  // ------ factory test ------
-  FactoryTest factory_test(*this);
-  if (factory_test.is_test_required()) {
-    if (factory_test.run_test()) {
-      device_state_.load_all(hw_);
-#if defined(HAS_DISPLAY)
-      display_.disp_welcome();
-      display_.update();
-#else
-      bsl_input_.LEDBlinkAll(2, LED_DFLT_BRIGHT, 500, 400, false);
+  // Before the display and the network, so a device that fails either is
+  // still reachable - which is the situation the console is most use in.
+#ifdef HOME_BUTTONS_DEBUG
+  console_.begin();
 #endif
-      info("factory test complete.");
-      _sleep_or_restart();
-    } else {
-      error("factory test failed!");
-#if defined(HAS_DISPLAY)
-      display_.disp_error("Factory\nTest\nFailed");
-      display_.update();
-#else
-      bsl_input_.LEDBlinkAll(5, LED_DFLT_BRIGHT, 200, 160, false);
-#endif
-      _sleep_or_restart();
-    }
-  }
 
   _begin_hw();
 
-  // ------ test code ------
-
-  // place test code here
-  // info("!!!!! Serial print test");
-  // Serial.println("Serial");
-  // Serial1.println("Serial1");
-  // Serial.begin(115200);
-  // Serial1.begin(115200);
-  // Serial.println("Serial after begin");
-  // Serial1.println("Serial1 after begin");
-  // debug("Debug");
-
-  // while (true) {
-  //   delay(1000);
-  // }
+  // Display::begin() mounts SPIFFS, so the stamp is readable from here on.
+  _read_spiffs_build();
+  display_.set_spiffs_build(spiffs_build_.c_str());
+  if (spiffs_build_.empty()) {
+    warning("SPIFFS build unknown - reflash the filesystem image");
+  } else if (!(spiffs_build_ == BUILD_ID)) {
+    // Not fatal: the two images are flashed separately and a mismatch is
+    // usually just a forgotten uploadfs. Worth saying out loud though.
+    warning("build mismatch: firmware %s, SPIFFS %s", BUILD_ID,
+            spiffs_build_.c_str());
+  } else {
+    info("build %s (firmware and SPIFFS match)", BUILD_ID);
+  }
 
   // ------ after update handler ------
   if (device_state_.persisted().last_sw_ver != SW_VERSION) {
@@ -401,22 +652,18 @@ void App::_main_task() {
       info("firmware updated from %s to %s",
            device_state_.persisted().last_sw_ver.c_str(), SW_VERSION);
       device_state_.persisted().last_sw_ver = SW_VERSION;
-      device_state_.persisted().send_discovery_config = true;
       device_state_.save_all();
-#if defined(HAS_DISPLAY)
       display_.disp_message(
           (UIState::MessageType("Firmware\nupdated to\n") + SW_VERSION)
               .c_str());
       display_.update();
-#endif
       ESP.restart();
     } else {  // first boot after factory flash
       device_state_.persisted().last_sw_ver = SW_VERSION;
     }
   }
 
-// ------ determine power mode ------
-#if defined(HOME_BUTTONS_ORIGINAL)
+  // ------ determine power mode ------
   device_state_.sensors().battery_present = hw_.is_battery_present();
   device_state_.sensors().dc_connected = hw_.is_dc_connected();
   info("batt present: %d, DC connected: %d",
@@ -470,7 +717,6 @@ void App::_main_task() {
   } else {  // battery_present == false
     if (device_state_.sensors().dc_connected) {
       device_state_.persisted().low_batt_mode = false;
-      // choose power mode based on user setting
       device_state_.flags().awake_mode =
           device_state_.persisted().user_awake_mode;
     } else {
@@ -481,53 +727,17 @@ void App::_main_task() {
   info("usr awake mode: %d, awake mode: %d",
        device_state_.persisted().user_awake_mode,
        device_state_.flags().awake_mode);
-#elif defined(HOME_BUTTONS_MINI)
-  float batt_voltage = hw_.read_battery_voltage();
-  info("batt volts: %f", batt_voltage);
 
-  if (device_state_.persisted().low_batt_mode) {
-    if (batt_voltage >= hw_.BATT_HYSTERESIS_VOLT) {
-      device_state_.persisted().low_batt_mode = false;
-      device_state_.save_all();
-      info("low batt mode disabled");
-      ESP.restart();  // to handle m_display update
-    } else {
-      info("in low batt mode...");
-      _go_to_sleep();
-    }
-  } else {  // low_batt_mode == false
-    if (batt_voltage < hw_.MIN_BATT_VOLT) {
-      // check again
-      delay(1000);
-      batt_voltage = hw_.read_battery_voltage();
-      if (batt_voltage < hw_.MIN_BATT_VOLT) {
-        device_state_.persisted().low_batt_mode = true;
-        warning("batt voltage too low, low bat mode enabled");
-        display_.disp_message_large(
-            "Turned\nOFF\n\nPlease\nreplace\nbatteries!");
-        display_.update();
-        _go_to_sleep();
-      }
-    } else if (batt_voltage <= hw_.WARN_BATT_VOLT) {
-      device_state_.sensors().battery_low = true;
-    }
-  }
-  // mini doesn't have awake mode
-  device_state_.flags().awake_mode = false;
-#elif defined(HOME_BUTTONS_PRO) || defined(HOME_BUTTONS_INDUSTRIAL)
-  device_state_.flags().awake_mode = true;
-#endif
-
-#if defined(HAS_TH_SENSOR)
-  // ------ read sensors ------
-  hw_.read_temp_hmd(device_state_.sensors().temperature,
-                    device_state_.sensors().humidity,
-                    device_state_.get_use_fahrenheit());
-#endif
-#if defined(HAS_BATTERY)
   device_state_.sensors().battery_pct = hw_.read_battery_percent();
   device_state_.sensors().battery_voltage = hw_.read_battery_voltage();
-#endif
+
+  // The clock survives deep sleep, so the boundary can be tested before the
+  // network is up - which matters when the reset wake is what woke us.
+  _check_reset();
+
+  // Labels carry the running totals, so make them match the counters
+  // restored from NVS before anything is drawn.
+  _refresh_counter_labels();
 
   // ------ start tasks ------
   _start_tasks();
@@ -541,31 +751,11 @@ void App::_main_task() {
   switch (boot_cause_) {
     case BootCause::RESET: {
       if (!device_state_.persisted().silent_restart) {
-#if defined(HAS_BUTTON_UI)
         bsl_input_.LEDOnAll();
         delay(1000);
-#endif
-#if defined(HAS_FRONTLIGHT)
-        hw_.set_frontlight(hw_.FL_LED_BRIGHT_DFLT);
-#endif
-#if defined(HAS_DISPLAY)
         display_.disp_message("RESTART...", 0);
         delay(3000);
-#endif
       }
-
-#if defined(HAS_DISPLAY)
-      // format SPIFFS if needed
-      if (!SPIFFS.begin()) {
-        info("Formatting icon storage...");
-        display_.disp_message("Formatting\nIcon\nStorage...", 0);
-        delay(3000);
-        SPIFFS.format();
-      } else {
-        SPIFFS.end();
-        debug("SPIFFS test mount OK");
-      }
-#endif
 
       // check if restart to setup or Wi-Fi setup is needed
       if (device_state_.persisted().restart_to_wifi_setup) {
@@ -582,44 +772,26 @@ void App::_main_task() {
 
       if (!device_state_.persisted().wifi_done ||
           !device_state_.persisted().setup_done) {
-#if defined(HAS_DISPLAY)
         display_.disp_welcome();
         delay(3000);
         display_.end();
         delay(3000);
-#endif
-#if defined(HAS_SLEEP_MODE)
         _go_to_sleep();
-#endif
       } else {
-#if defined(HAS_DISPLAY)
         display_.disp_main();
         delay(3000);
-#endif
       }
-      device_state_.persisted().download_mdi_icons = true;
-      device_state_.persisted().send_discovery_config = true;
       device_state_.save_all();
       if (device_state_.flags().awake_mode) {
-// proceed with awake mode
-#if defined(HAS_BUTTON_UI)
         bsl_input_.LEDOffAll();
-#elif defined(HAS_FRONTLIGHT)
-        hw_.set_frontlight(0);
-#endif
       } else {
-#if defined(HAS_DISPLAY)
         display_.end();
         delay(3000);
-#endif
-#if defined(HAS_SLEEP_MODE)
         _go_to_sleep();
-#endif
       }
       break;
     }
     case BootCause::BUTTON: {
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
       if (!device_state_.flags().awake_mode) {
         if (device_state_.persisted().charge_complete_showing) {
           device_state_.persisted().charge_complete_showing = false;
@@ -645,363 +817,47 @@ void App::_main_task() {
         } else {
           // proceed
         }
-      } else {
-        // proceed with awake mode
       }
       break;
-#endif
     }
-
-#if defined(HOME_BUTTONS_ORIGINAL)
     case BootCause::TIMER: {
-      if (device_state_.flags().awake_mode) {
-        // proceed with awake mode
-      } else {
-        if (hw_.is_charger_in_standby()) {  // hw <= 2.1 doesn't have awake
-          // mode when charging
+      if (!device_state_.flags().awake_mode) {
+        if (hw_.is_charger_in_standby()) {
           if (!device_state_.persisted().charge_complete_showing) {
             device_state_.persisted().charge_complete_showing = true;
             display_.disp_message_large("Fully\ncharged!");
           }
         }
-        // proceed with sensor publish
+        // proceed with the heartbeat post
       }
       break;
     }
-#endif
     default:
       break;
   }
 
-#if defined(HAS_DISPLAY)
   display_.init_ui_state(UIState{.page = DisplayPage::MAIN});
-#endif
-  network_.set_mqtt_callback(std::bind(&App::_mqtt_callback, this,
-                                       std::placeholders::_1,
-                                       std::placeholders::_2));
   network_.set_on_connect(std::bind(&App::_net_on_connect, this));
-
-#if defined(HAS_TOUCH_UI)
-  touch_handler_.SetEventCallbackSecondary(
-      std::bind(&App::_handle_ui_event_global, this, std::placeholders::_1));
-#endif
 
   debug("Starting main state machine loop");
   while (true) {
     loop();
+    _service_console();
+    _service_reset();
+    _service_webhook();
+    _service_display();
     esp_task_wdt_reset();
     delay(10);
   }
 }
 
-void App::_handle_ui_event_global(UserInput::Event event) {
-  device_state_.flags().last_user_input_time = millis();
-}
-
-void App::_publish_ui_event(UserInput::Event event) {
-  TopicType topic = topics_.get_button_topic(event);
-  if (event.type == UserInput::EventType::kClickSingle ||
-      event.type == UserInput::EventType::kClickDouble ||
-      event.type == UserInput::EventType::kClickTriple ||
-      event.type == UserInput::EventType::kClickQuad) {
-    network_.publish(topic, BTN_PRESS_PAYLOAD);
-  } else if (event.type == UserInput::EventType::kSwitchOn) {
-    network_.publish(topic, "ON");
-  } else if (event.type == UserInput::EventType::kSwitchOff) {
-    network_.publish(topic, "OFF");
-  }
-}
-
-#if defined(HAS_TH_SENSOR)
-void App::_publish_sensors() {
-  network_.publish(topics_.t_temperature(),
-                   PayloadType("%.2f", device_state_.sensors().temperature));
-  network_.publish(topics_.t_humidity(),
-                   PayloadType("%.2f", device_state_.sensors().humidity));
-  network_.publish(topics_.t_battery(),
-                   PayloadType("%u", device_state_.sensors().battery_pct));
-}
-#endif
-
-#if defined(HAS_BATTERY)
-void App::_publish_battery() {
-  network_.publish(topics_.t_battery(),
-                   PayloadType("%u", device_state_.sensors().battery_pct));
-}
-#endif
-
-#if defined(HAS_AWAKE_MODE)
-void App::_publish_awake_mode_avlb() {
-  if (hw_.is_dc_connected()) {
-    network_.publish(topics_.t_awake_mode_avlb(), "online", true);
-  } else {
-    network_.publish(topics_.t_awake_mode_avlb(), "offline", true);
-  }
-}
-#endif
-
-void App::_mqtt_callback(const char* topic, const char* payload) {
-#if defined(HAS_TH_SENSOR)
-  if (strcmp(topic, topics_.t_sensor_interval_cmd().c_str()) == 0) {
-    uint16_t mins = atoi(payload);
-    if (mins >= SEN_INTERVAL_MIN && mins <= SEN_INTERVAL_MAX) {
-      device_state_.set_sensor_interval(mins);
-      device_state_.save_all();
-      network_.publish(topics_.t_sensor_interval_state(),
-                       PayloadType("%u", device_state_.sensor_interval()),
-                       true);
-      info("Updating discovery config...");
-      mqtt_.update_discovery_config();
-      debug("sensor interval set to %d minutes", mins);
-      _publish_sensors();
-    }
-    network_.publish(topics_.t_sensor_interval_cmd(), "", true);
-    return;
-  }
-#endif
-
-#if defined(HAS_DISPLAY)
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    if (strcmp(topic, topics_.t_btn_label_cmd(i + 1).c_str()) == 0) {
-      ButtonLabel new_label(payload);
-      new_label = new_label.trim();
-      debug("button %d label changed to: %s", i + 1, new_label.c_str());
-      device_state_.set_btn_label(i + 1, new_label.c_str());
-
-      network_.publish(topics_.t_btn_label_state(i + 1),
-                       device_state_.get_btn_label(i + 1), true);
-      network_.publish(topics_.t_btn_label_cmd(i + 1), "", true);
-      device_state_.flags().display_redraw = true;
-      device_state_.save_all();
-
-      ButtonLabel label(device_state_.get_btn_label(i + 1).c_str());
-
-      if (label.substring(0, 4) == "mdi:") {
-        device_state_.persisted().download_mdi_icons = true;
-      }
-      return;
-    }
-  }
-#endif
-
-#if defined(HAS_AWAKE_MODE)
-  if (strcmp(topic, topics_.t_awake_mode_cmd().c_str()) == 0) {
-    if (strcmp(payload, "ON") == 0) {
-      device_state_.persisted().user_awake_mode = true;
-      device_state_.flags().awake_mode = true;
-      device_state_.save_all();
-      network_.publish(topics_.t_awake_mode_state(), "ON", true);
-      debug("user awake mode set to: ON");
-      debug("resetting to awake mode...");
-    } else if (strcmp(payload, "OFF") == 0) {
-      device_state_.persisted().user_awake_mode = false;
-      device_state_.save_all();
-      network_.publish(topics_.t_awake_mode_state(), "OFF", true);
-      debug("user awake mode set to: OFF");
-    }
-    network_.publish(topics_.t_awake_mode_cmd(), "", true);
-    return;
-  }
-#endif
-
-#if defined(HAS_DISPLAY)
-  // user message
-  if (strcmp(topic, topics_.t_disp_msg_cmd().c_str()) == 0) {
-    if (display_.get_ui_state().page == DisplayPage::MAIN) {
-      UserMessage msg(payload);
-      device_state_.persisted().user_msg_showing = true;
-      device_state_.save_all();
-      display_.disp_message_large(msg.c_str());
-    }
-    network_.publish(topics_.t_disp_msg_cmd(), "", true);
-    network_.publish(topics_.t_disp_msg_state(), "-", false);
-  }
-#endif
-
-#if defined(HAS_SLEEP_MODE)
-  // schedule wakeup cmd
-  if (strcmp(topic, topics_.t_schedule_wakeup_cmd().c_str()) == 0) {
-    uint32_t secs = atoi(payload);
-    if (secs >= SCHEDULE_WAKEUP_MIN && secs <= SCHEDULE_WAKEUP_MAX) {
-      device_state_.flags().schedule_wakeup_time = secs;
-      network_.publish(topics_.t_schedule_wakeup_cmd(), "", true);
-      network_.publish(topics_.t_schedule_wakeup_state(), "None", true);
-      debug("schedule wakeup set to %d seconds", secs);
-    }
-  }
-#endif
-
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  // led amb_bright cmd
-  if (strcmp(topic, topics_.t_led_amb_bright_cmd().c_str()) == 0) {
-    uint16_t amb_bright = atoi(payload);
-    if (amb_bright <= LED_MAX_AMB_BRIGHT) {
-      device_state_.set_led_brightness(amb_bright);
-      device_state_.save_all();
-      bsl_input_.LEDSetAmbientBrightnessAll(amb_bright);
-      bsl_input_.LEDSetDefaultBrightnessAll(
-          amb_bright * (LED_DFLT_BRIGHT / LED_MAX_AMB_BRIGHT));
-      network_.publish(topics_.t_led_amb_bright_state(),
-                       PayloadType("%u", amb_bright), true);
-      debug("LED amb_bright set to %d", amb_bright);
-    } else {
-      warning("Invalid amb_bright value: %d", amb_bright);
-    }
-    network_.publish(topics_.t_led_amb_bright_cmd(), "", true);
-    return;
-  }
-
-  // switch cmd
-  for (auto bsl_w : bsl_input_.GetBtnSwLEDs()) {
-    if (bsl_w.get().switch_mode() && !bsl_w.get().is_kill_switch()) {
-      if (strcmp(topic, topics_.t_switch_cmd(bsl_w.get().id()).c_str()) == 0) {
-        if (strcmp(payload, "ON") == 0) {
-          bsl_w.get().SetSwitchOn();
-          network_.publish(topics_.t_switch_state(bsl_w.get().id()), "ON",
-                           false);
-        } else if (strcmp(payload, "OFF") == 0) {
-          network_.publish(topics_.t_switch_state(bsl_w.get().id()), "OFF",
-                           false);
-          bsl_w.get().SetSwitchOff();
-        }
-        network_.publish(topics_.t_switch_cmd(bsl_w.get().id()), "", true);
-        return;
-      }
-    }
-  }
-#endif
-}
-
-void App::_net_on_connect() {
-  if (device_state_.persisted().send_discovery_config) {
-    device_state_.persisted().send_discovery_config = false;
-    info("Sending discovery config...");
-    mqtt_.send_discovery_config();
-  }
-
-  network_.subscribe(topics_.t_cmd() + "#");
-#if defined(HAS_AWAKE_MODE)
-  _publish_awake_mode_avlb();
-  network_.publish(topics_.t_awake_mode_state(),
-                   (device_state_.persisted().user_awake_mode) ? "ON" : "OFF",
-                   true);
-#endif
-#if defined(HAS_TH_SENSOR)
-  network_.publish(topics_.t_sensor_interval_state(),
-                   PayloadType("%u", device_state_.sensor_interval()), true);
-#endif
-#if defined(HAS_DISPLAY)
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    auto t = topics_.t_btn_label_state(i + 1);
-    network_.publish(t, device_state_.get_btn_label(i + 1), true);
-  }
-  network_.publish(topics_.t_disp_msg_state(), "-", false);
-#endif
-
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  network_.publish(
-      topics_.t_led_amb_bright_state(),
-      PayloadType("%u", device_state_.user_preferences().led_amb_bright, true));
-  network_.publish(topics_.t_avlb(), "online", true);
-  for (auto bsl_w : bsl_input_.GetBtnSwLEDs()) {
-    // publish switch state is switch mode
-    if (bsl_w.get().switch_mode()) {
-      network_.publish(topics_.t_switch_state(bsl_w.get().id()),
-                       bsl_w.get().switch_state() ? "ON" : "OFF", false);
-    }
-  }
-#endif
-
-#if defined(HAS_DISPLAY)
-  if (device_state_.persisted().download_mdi_icons) {
-    device_state_.persisted().download_mdi_icons = false;
-    _download_mdi_icons();
-  }
-#endif
-}
-
-#if defined(HAS_DISPLAY)
-void App::_download_mdi_icons() {
-  bool download_required = false;
-  mdi_.begin();
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    ButtonLabel label(device_state_.get_btn_label(i + 1).c_str());
-    if (label.substring(0, 4) == "mdi:") {
-      MDIName icon = label.substring(
-          4, label.index_of(' ') > 0 ? label.index_of(' ') : label.length());
-      if (!mdi_.exists_all_sizes(icon.c_str())) {
-        download_required = true;
-        break;
-      }
-    }
-  }
-  if (!download_required) {
-    info("no icons to download");
-    mdi_.end();
-    return;
-  }
-
-  display_.disp_message("Downloading\nicons...");
-
-  // check if server is reachable
-  if (mdi_.check_connection()) {
-    info("icon server reachable");
-  } else {
-    warning("icon server NOT reachable");
-    mdi_.end();
-    display_.disp_error("Icon\nserver\nNOT\nreachable");
-    device_state_.flags().display_redraw = true;
-    return;
-  }
-
-  // free up space if needed
-  size_t free = mdi_.get_free_space();
-  info("SPIFFS free space: %d", free);
-  if (free < MDI_FREE_SPACE_THRESHOLD) {
-    info("making space...");
-    if (!mdi_.make_space(2 * MDI_FREE_SPACE_THRESHOLD)) {
-      error("failed to make space");
-      mdi_.end();
-      return;
-    }
-  }
-
-  info("Downloading icons...");
-  for (uint8_t i = 0; i < NUM_BUTTONS; i++) {
-    ButtonLabel label(device_state_.get_btn_label(i + 1).c_str());
-    if (label.substring(0, 4) == "mdi:") {
-      MDIName icon = label.substring(
-          4, label.index_of(' ') > 0 ? label.index_of(' ') : label.length());
-      if (!mdi_.exists_all_sizes(icon.c_str())) {
-        mdi_.download(icon.c_str());
-      }
-    }
-  }
-  mdi_.end();
-  device_state_.flags().display_redraw = true;
-}
-#endif
+// ---------------------------------------------------------------------------
+// States
+// ---------------------------------------------------------------------------
 
 void AppSMStates::InitState::entry() {
   sm().network_.connect();
   sm().bsl_input_.InitPress(sm().wakeup_btn_id_);
-
-#if defined(HOME_BUTTONS_ORIGINAL)
-  sm().mdi_.add_size(64);
-  sm().mdi_.add_size(48);
-#elif defined(HOME_BUTTONS_MINI)
-  sm().mdi_.add_size(100);
-#elif defined(HOME_BUTTONS_PRO)
-  sm().mdi_.add_size(92);
-  sm().mdi_.add_size(64);
-#endif
-
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  uint8_t amb_bright = sm().device_state_.user_preferences().led_amb_bright;
-  sm().bsl_input_.LEDSetAmbientBrightnessAll(amb_bright);
-  uint8_t dflt_bright = amb_bright * (LED_DFLT_BRIGHT / LED_MAX_AMB_BRIGHT);
-  sm().bsl_input_.LEDSetDefaultBrightnessAll(dflt_bright);
-#endif
 
   // open settings menu if setup not done
   if (sm().device_state_.flags().awake_mode) {
@@ -1028,24 +884,15 @@ void AppSMStates::InitState::entry() {
     sm().device_state_.persisted().charge_complete_showing = false;
     esp_task_wdt_init(WDT_TIMEOUT_AWAKE, true);
     esp_task_wdt_add(NULL);
-#if defined(HAS_DISPLAY)
     sm().display_.disp_main();
-#endif
     return transition_to<AwakeModeIdleState>();
   }
 }
 
 void AppSMStates::AwakeModeIdleState::entry() {
-#if defined(HAS_DISPLAY)
   sm().display_.disp_main();
-#endif
-#if defined(HAS_BUTTON_UI)
   sm().bsl_input_.SetEventCallback(std::bind(
       &AwakeModeIdleState::handle_ui_event, this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &AwakeModeIdleState::handle_ui_event, this, std::placeholders::_1));
-#endif
 }
 
 void AppSMStates::AwakeModeIdleState::exit() {
@@ -1053,51 +900,9 @@ void AppSMStates::AwakeModeIdleState::exit() {
 }
 
 void AppSMStates::AwakeModeIdleState::loop() {
-  if (millis() - sm().last_sensor_publish_ >= AWAKE_SENSOR_INTERVAL) {
-#if defined(HAS_TH_SENSOR)
-    sm().hw_.read_temp_hmd(sm().device_state_.sensors().temperature,
-                           sm().device_state_.sensors().humidity,
-                           sm().device_state_.get_use_fahrenheit());
-    sm()._publish_sensors();
-#endif
+  sm()._flush_pending();
 
-#if defined(HAS_BATTERY)
-    sm().device_state_.sensors().battery_pct = sm().hw_.read_battery_percent();
-    sm().device_state_.sensors().battery_voltage =
-        sm().hw_.read_battery_voltage();
-    sm()._publish_battery();
-#endif
-    sm().last_sensor_publish_ = millis();
-    sm()._publish_system_state();
-#ifdef HOME_BUTTONS_DEBUG
-    sm()._log_task_stats();
-#endif
-  }
-
-#if defined(HAS_DISPLAY)
-  if (millis() - sm().last_m_display_redraw_ >= AWAKE_REDRAW_INTERVAL) {
-    if (sm().device_state_.flags().display_redraw) {
-      sm().device_state_.flags().display_redraw = false;
-      if (sm().device_state_.persisted().download_mdi_icons) {
-        sm()._download_mdi_icons();
-        sm().device_state_.persisted().download_mdi_icons = false;
-      }
-      sm().display_.disp_main();
-    }
-    sm().last_m_display_redraw_ = millis();
-  }
-#endif
-
-#if defined(HAS_FRONTLIGHT)
-  else if (millis() - sm().device_state_.flags().last_user_input_time >
-           FRONTLIGHT_TIMEOUT) {
-    sm().hw_.set_frontlight(0);
-  }
-#endif
-
-#if defined(HAS_CHARGER)
-  else if (!sm().hw_.is_dc_connected()) {
-    sm()._publish_awake_mode_avlb();
+  if (!sm().hw_.is_dc_connected()) {
     sm().device_state_.sensors().charging = false;
     return transition_to<CmdShutdownState>();
   }
@@ -1114,43 +919,25 @@ void AppSMStates::AwakeModeIdleState::loop() {
       return transition_to<CmdShutdownState>();
     }
   }
-#endif
 }
 
 void AppSMStates::AwakeModeIdleState::handle_ui_event(UserInput::Event event) {
   sm().device_state_.flags().last_user_input_time = millis();
-#if defined(HAS_FRONTLIGHT)
-  sm().hw_.set_frontlight(sm().hw_.FL_LED_BRIGHT_DFLT);
-#endif
   if (event.final) {
     switch (event.type) {
       case UserInput::EventType::kClickSingle:
-      case UserInput::EventType::kClickDouble:
-      case UserInput::EventType::kClickTriple:
-      case UserInput::EventType::kClickQuad:
-        sm()._publish_ui_event(event);
-        sm().bsl_input_.LEDBlink(event.btn_id,
-                                 UserInput::EventType2NumClicks(event.type), 0,
-                                 0, 0, false);
-        break;
-      case UserInput::EventType::kSwipeDown:
-        return transition_to<InfoScreenState>();
-      case UserInput::EventType::kSwitchOff:
-      case UserInput::EventType::kSwitchOn:
-        sm()._publish_ui_event(event);
+        sm()._handle_counter_press(event.btn_id);
         break;
       default:
         break;
     }
   } else {
     switch (event.type) {
-#if defined(HAS_DISPLAY)
       case UserInput::EventType::kHoldLong2s:
         if (sm().hw_.num_buttons_pressed() == 1) {
           return transition_to<InfoScreenState>();
         }
         break;
-#endif
       case UserInput::EventType::kHoldLong5s:
         if (sm().hw_.num_buttons_pressed() == 2) {
           return transition_to<SettingsMenuState>();
@@ -1164,13 +951,8 @@ void AppSMStates::AwakeModeIdleState::handle_ui_event(UserInput::Event event) {
 
 void AppSMStates::SleepModeHandleInput::entry() {
   sm().input_start_time_ = millis();
-#if defined(HAS_BUTTON_UI)
   sm().bsl_input_.SetEventCallback(std::bind(
       &SleepModeHandleInput::handle_ui_event, this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &SleepModeHandleInput::handle_ui_event, this, std::placeholders::_1));
-#endif
 }
 
 void AppSMStates::SleepModeHandleInput::exit() {
@@ -1178,6 +960,12 @@ void AppSMStates::SleepModeHandleInput::exit() {
 }
 
 void AppSMStates::SleepModeHandleInput::loop() {
+  // A press injected from the console. Nothing in this state connects the
+  // network, so without this it would sit in the queue until the timeout
+  // below slept the device with it undelivered.
+  if (sm().console_press_pending_.exchange(false)) {
+    return transition_to<NetConnectingState>();
+  }
   if (millis() - sm().input_start_time_ > SLEEP_MODE_INPUT_TIMEOUT) {
     return transition_to<CmdShutdownState>();
   }
@@ -1188,10 +976,7 @@ void AppSMStates::SleepModeHandleInput::handle_ui_event(
   sm().device_state_.flags().last_user_input_time = millis();
   if (event.final) {
     switch (event.type) {
-      case UserInput::EventType::kClickSingle:
-      case UserInput::EventType::kClickDouble:
-      case UserInput::EventType::kClickTriple:
-      case UserInput::EventType::kClickQuad:
+      case UserInput::EventType::kClickSingle: {
         if (!sm().device_state_.persisted().wifi_done) {
           sm().device_state_.persisted().restart_to_wifi_setup = true;
           sm().device_state_.persisted().silent_restart = true;
@@ -1205,22 +990,18 @@ void AppSMStates::SleepModeHandleInput::handle_ui_event(
           sm().info("restarting to setup...");
           ESP.restart();
         }
-        sm().bsl_input_.LEDBlink(event.btn_id,
-                                 UserInput::EventType2NumClicks(event.type), 0,
-                                 0, 0, true);
-#if defined(HAS_BATTERY)
+        sm()._handle_counter_press(event.btn_id);
         if (sm().device_state_.sensors().battery_low) {
           sm().display_.disp_message_large(BATT_EMPTY_MSG, 3000);
         }
-#endif
         sm().user_event_ = event;
         return transition_to<NetConnectingState>();
+      }
       default:
         break;
     }
   } else {  // non final event
     switch (event.type) {
-#if defined(HAS_DISPLAY)
       case UserInput::EventType::kHoldLong2s:
         if (sm().hw_.num_buttons_pressed() == 1) {
           return transition_to<InfoScreenState>();
@@ -1231,7 +1012,6 @@ void AppSMStates::SleepModeHandleInput::handle_ui_event(
           return transition_to<SettingsMenuState>();
         }
         break;
-#endif
       default:
         break;
     }
@@ -1239,13 +1019,9 @@ void AppSMStates::SleepModeHandleInput::handle_ui_event(
 }
 
 void AppSMStates::NetConnectingState::entry() {
-#if defined(HAS_BUTTON_UI)
+  start_time_ = millis();
   sm().bsl_input_.SetEventCallback(std::bind(
       &NetConnectingState::handle_ui_event, this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &NetConnectingState::handle_ui_event, this, std::placeholders::_1));
-#endif
 }
 
 void AppSMStates::NetConnectingState::exit() {
@@ -1253,27 +1029,16 @@ void AppSMStates::NetConnectingState::exit() {
 }
 
 void AppSMStates::NetConnectingState::loop() {
-#if defined(HAS_BUTTON_UI)
-  if (sm().network_.get_state() == Network::State::M_CONNECTED) {
-    if (sm().user_event_.type != UserInput::EventType::kNone) {
-      sm()._publish_ui_event(sm().user_event_);
-    }
-#if defined(HAS_TH_SENSOR)
-    sm().hw_.read_temp_hmd(sm().device_state_.sensors().temperature,
-                           sm().device_state_.sensors().humidity,
-                           sm().device_state_.get_use_fahrenheit());
-    sm()._publish_sensors();
-    sm()._publish_system_state();
-#endif
-#if defined(HAS_BATTERY)
-    sm().device_state_.sensors().battery_pct = sm().hw_.read_battery_percent();
-    sm()._publish_battery();
-#endif
+  if (sm().network_.get_state() == Network::State::W_CONNECTED) {
     sm().device_state_.persisted().failed_connections = 0;
+    sm()._flush_pending();
+    if (sm().boot_cause_ == BootCause::BUTTON) {
+      return transition_to<SessionState>();
+    }
     return transition_to<CmdShutdownState>();
-
-  } else if (millis() >= NET_CONNECT_TIMEOUT) {
-#if defined(HAS_DISPLAY)
+    // Upstream compared millis() against the timeout directly, which only
+    // happened to work because the device had just booted.
+  } else if (millis() - start_time_ >= NET_CONNECT_TIMEOUT) {
     sm().warning("network connect timeout.");
     if (sm().boot_cause_ == BootCause::BUTTON) {
       sm().display_.disp_error("Network\nconnection\nnot\nsuccessful", 3000);
@@ -1287,18 +1052,54 @@ void AppSMStates::NetConnectingState::loop() {
       }
     }
     return transition_to<CmdShutdownState>();
-#endif
   }
-#endif
 }
 
 void AppSMStates::NetConnectingState::handle_ui_event(UserInput::Event event) {
   sm().device_state_.flags().last_user_input_time = millis();
+  if (event.final && event.type == UserInput::EventType::kClickSingle) {
+    // Queued now, delivered as soon as the link comes up.
+    sm()._handle_counter_press(event.btn_id);
+  }
+}
+
+void AppSMStates::SessionState::entry() {
+  sm().session_last_input_time_ = millis();
+  sm().info("session open, sleeping after %u ms idle", SESSION_IDLE_TIMEOUT);
+  sm().display_.disp_main();
+  sm().bsl_input_.SetEventCallback(
+      std::bind(&SessionState::handle_ui_event, this, std::placeholders::_1));
+}
+
+void AppSMStates::SessionState::exit() { sm().bsl_input_.ClearEventCallback(); }
+
+void AppSMStates::SessionState::loop() {
+  sm()._flush_pending();
+
+  if (millis() - sm().session_last_input_time_ > SESSION_IDLE_TIMEOUT) {
+    sm().info("session idle, shutting down");
+    return transition_to<CmdShutdownState>();
+  }
+}
+
+void AppSMStates::SessionState::handle_ui_event(UserInput::Event event) {
+  sm().device_state_.flags().last_user_input_time = millis();
+  sm().session_last_input_time_ = millis();
   if (event.final) {
+    if (event.type == UserInput::EventType::kClickSingle) {
+      sm()._handle_counter_press(event.btn_id);
+    }
+  } else {
     switch (event.type) {
-      case UserInput::EventType::kClickSingle:
-        sm().info("button press - user cancelled, aborting...");
-        return transition_to<CmdShutdownState>();
+      case UserInput::EventType::kHoldLong2s:
+        if (sm().hw_.num_buttons_pressed() == 1) {
+          return transition_to<InfoScreenState>();
+        }
+        break;
+      case UserInput::EventType::kHoldLong5s:
+        if (sm().hw_.num_buttons_pressed() == 2) {
+          return transition_to<SettingsMenuState>();
+        }
         break;
       default:
         break;
@@ -1307,35 +1108,21 @@ void AppSMStates::NetConnectingState::handle_ui_event(UserInput::Event event) {
 }
 
 void AppSMStates::InfoScreenState::entry() {
-#if defined(HAS_DISPLAY)
   sm().info_screen_start_time_ = millis();
   sm().display_.disp_info();
-#if defined(HAS_BUTTON_UI)
   sm().bsl_input_.SetEventCallback(std::bind(&InfoScreenState::handle_ui_event,
                                              this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().device_state_.flags().keep_frontlight_on = true;
-  sm().hw_.set_frontlight(sm().hw_.FL_LED_BRIGHT_DFLT);
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &InfoScreenState::handle_ui_event, this, std::placeholders::_1));
-#endif
-#endif
 }
 
 void AppSMStates::InfoScreenState::exit() {
   sm().bsl_input_.ClearEventCallback();
-  sm().device_state_.flags().keep_frontlight_on = false;
 }
 
 void AppSMStates::InfoScreenState::loop() {
-  if (millis() - sm().info_screen_start_time_ >= INFO_SCREEN_DISP_TIME) {
-    sm().debug("info screen timeout");
+  if (millis() - sm().info_screen_start_time_ > INFO_SCREEN_DISP_TIME) {
     if (sm().device_state_.flags().awake_mode) {
       return transition_to<AwakeModeIdleState>();
     } else {
-#if defined(HAS_DISPLAY)
-      sm().display_.disp_main();
-#endif
       return transition_to<CmdShutdownState>();
     }
   }
@@ -1343,52 +1130,28 @@ void AppSMStates::InfoScreenState::loop() {
 
 void AppSMStates::InfoScreenState::handle_ui_event(UserInput::Event event) {
   sm().device_state_.flags().last_user_input_time = millis();
-  if (event.final) {
-    switch (event.type) {
-      case UserInput::EventType::kSwipeUp:
-      case UserInput::EventType::kSwipeDown:
-      case UserInput::EventType::kClickSingle:
-        if (sm().device_state_.flags().awake_mode) {
-          return transition_to<AwakeModeIdleState>();
-        } else {
-          return transition_to<CmdShutdownState>();
-        }
-      default:
-        break;
+  if (event.final && event.type == UserInput::EventType::kClickSingle) {
+    if (sm().device_state_.flags().awake_mode) {
+      return transition_to<AwakeModeIdleState>();
+    } else {
+      return transition_to<CmdShutdownState>();
+    }
+  } else if (!event.final && event.type == UserInput::EventType::kHoldLong5s) {
+    if (sm().hw_.num_buttons_pressed() == 2) {
+      return transition_to<SettingsMenuState>();
     }
   }
 }
 
 void AppSMStates::SettingsMenuState::entry() {
   sm().settings_menu_start_time_ = millis();
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  sm().bsl_input_.PauseSwitchModeAll();
-#endif
-#if defined(HAS_DISPLAY)
   sm().display_.disp_settings();
-#else
-  sm().bsl_input_.LEDPulseAll(0, 2000);
-#endif
-#if defined(HAS_BUTTON_UI)
   sm().bsl_input_.SetEventCallback(std::bind(
       &SettingsMenuState::handle_ui_event, this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().device_state_.flags().keep_frontlight_on = true;
-  sm().hw_.set_frontlight(sm().hw_.FL_LED_BRIGHT_DFLT);
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &SettingsMenuState::handle_ui_event, this, std::placeholders::_1));
-#endif
 }
 
 void AppSMStates::SettingsMenuState::exit() {
   sm().bsl_input_.ClearEventCallback();
-  sm().device_state_.flags().keep_frontlight_on = false;
-#if !defined(HAS_DISPLAY)
-  sm().bsl_input_.LEDOffAll();
-#endif
-#if defined(HOME_BUTTONS_INDUSTRIAL)
-  sm().bsl_input_.ResumeSwitchModeAll();
-#endif
 }
 
 void AppSMStates::SettingsMenuState::loop() {
@@ -1404,46 +1167,41 @@ void AppSMStates::SettingsMenuState::loop() {
 
 void AppSMStates::SettingsMenuState::handle_ui_event(UserInput::Event event) {
   sm().device_state_.flags().last_user_input_time = millis();
-#if defined(HAS_BUTTON_UI)
   if (event.final) {
-    switch (event.type) {
-      case UserInput::EventType::kClickSingle:
-        switch (event.btn_id) {
-          case 1:
-            // setup
-            sm().device_state_.persisted().restart_to_setup = true;
-            sm().device_state_.persisted().silent_restart = true;
-            sm().device_state_.save_all();
-            sm().info("restarting to setup...");
-            ESP.restart();
-            break;
-          case 2:
-            // Wi-Fi setup
-            sm().device_state_.persisted().restart_to_wifi_setup = true;
-            sm().device_state_.persisted().silent_restart = true;
-            sm().device_state_.save_all();
-            sm().info("restarting to Wi-Fi setup...");
-            ESP.restart();
-            break;
-          case 3:
-            // restart
-            sm().info("restarting...");
-            ESP.restart();
-            break;
-          case 4:
-            // cancel
-            if (sm().device_state_.flags().awake_mode) {
-              return transition_to<AwakeModeIdleState>();
-            } else {
-              return transition_to<CmdShutdownState>();
-            }
-            break;
-          default:
-            break;
-        }
-        break;
-      default:
-        break;
+    if (event.type == UserInput::EventType::kClickSingle) {
+      switch (event.btn_id) {
+        case 1:
+          // setup
+          sm().device_state_.persisted().restart_to_setup = true;
+          sm().device_state_.persisted().silent_restart = true;
+          sm().device_state_.save_all();
+          sm().info("restarting to setup...");
+          ESP.restart();
+          break;
+        case 2:
+          // Wi-Fi setup
+          sm().device_state_.persisted().restart_to_wifi_setup = true;
+          sm().device_state_.persisted().silent_restart = true;
+          sm().device_state_.save_all();
+          sm().info("restarting to Wi-Fi setup...");
+          ESP.restart();
+          break;
+        case 3:
+          // restart
+          sm().info("restarting...");
+          ESP.restart();
+          break;
+        case 4:
+          // cancel
+          if (sm().device_state_.flags().awake_mode) {
+            return transition_to<AwakeModeIdleState>();
+          } else {
+            return transition_to<CmdShutdownState>();
+          }
+          break;
+        default:
+          break;
+      }
     }
   } else {  // non final
     switch (event.type) {
@@ -1453,80 +1211,31 @@ void AppSMStates::SettingsMenuState::handle_ui_event(UserInput::Event event) {
           return transition_to<FactoryResetState>();
         }
         break;
-#if defined(HAS_DISPLAY)
       case UserInput::EventType::kHoldLong2s:
         if (event.btn_id == 1) {
           // device info screen
           return transition_to<DeviceInfoState>();
         }
         break;
-#endif
       default:
         break;
     }
   }
-
-#elif defined(HOME_BUTTONS_PRO)
-  if (event.final) {
-    switch (event.type) {
-      case UserInput::EventType::kClickSingle:
-        if (event.point.y < 74) {
-          // setup
-          sm().device_state_.persisted().restart_to_setup = true;
-          sm().device_state_.persisted().silent_restart = true;
-          sm().device_state_.save_all();
-          ESP.restart();
-        } else if (event.point.y < 149) {
-          // Wi-Fi setup
-          sm().device_state_.persisted().restart_to_wifi_setup = true;
-          sm().device_state_.persisted().silent_restart = true;
-          sm().device_state_.save_all();
-          ESP.restart();
-        } else if (event.point.y < 224) {
-          // restart
-          ESP.restart();
-        } else {
-          // exit
-          return transition_to<AwakeModeIdleState>();
-        }
-        break;
-      case UserInput::EventType::kHoldLong10s:
-        if (event.point.y > 149 && event.point.y < 224) {
-          // factory reset
-          return transition_to<FactoryResetState>();
-        }
-        break;
-      default:
-        break;
-    }
-  }
-#endif
 }
 
 void AppSMStates::DeviceInfoState::entry() {
   sm().device_info_start_time_ = millis();
-#if defined(HAS_DISPLAY)
   sm().display_.disp_device_info();
-#endif
-#if defined(HAS_BUTTON_UI)
   sm().bsl_input_.SetEventCallback(std::bind(&DeviceInfoState::handle_ui_event,
                                              this, std::placeholders::_1));
-#elif defined(HAS_TOUCH_UI)
-  sm().device_state_.flags().keep_frontlight_on = true;
-  sm().hw_.set_frontlight(sm().hw_.FL_LED_BRIGHT_DFLT);
-  sm().touch_handler_.SetEventCallback(std::bind(
-      &DeviceInfoState::handle_ui_event, this, std::placeholders::_1));
-#endif
 }
 
 void AppSMStates::DeviceInfoState::exit() {
   sm().bsl_input_.ClearEventCallback();
-  sm().device_state_.flags().keep_frontlight_on = false;
 }
 
 void AppSMStates::DeviceInfoState::loop() {
   if (millis() - sm().device_info_start_time_ > DEVICE_INFO_TIMEOUT) {
-    sm().debug("device info timeout");
     if (sm().device_state_.flags().awake_mode) {
       return transition_to<AwakeModeIdleState>();
     } else {
@@ -1537,130 +1246,87 @@ void AppSMStates::DeviceInfoState::loop() {
 
 void AppSMStates::DeviceInfoState::handle_ui_event(UserInput::Event event) {
   sm().device_state_.flags().last_user_input_time = millis();
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
-  if (event.final) {
-    switch (event.type) {
-      case UserInput::EventType::kClickSingle:
-        // cancel
-        if (sm().device_state_.flags().awake_mode) {
-          return transition_to<AwakeModeIdleState>();
-        } else {
-          return transition_to<CmdShutdownState>();
-        }
-        break;
-      default:
-        break;
+  if (event.final && event.type == UserInput::EventType::kClickSingle) {
+    if (sm().device_state_.flags().awake_mode) {
+      return transition_to<AwakeModeIdleState>();
+    } else {
+      return transition_to<CmdShutdownState>();
     }
   }
-#elif defined(HOME_BUTTONS_PRO)
-#TODO
-#endif
 }
 
 void AppSMStates::CmdShutdownState::entry() {
-#if defined(HAS_DISPLAY)
-  if (sm().display_.get_ui_state().page != DisplayPage::MAIN) {
-    sm().display_.disp_main();
-  }
-  if (sm().device_state_.persisted().download_mdi_icons) {
-    sm()._download_mdi_icons();
-    sm().device_state_.persisted().download_mdi_icons = false;
-  }
-  if (sm().boot_cause_ == BootCause::RESET) {
-    sm().display_.disp_main();
-  }
-#endif
   sm().shutdown_cmd_time_ = millis();
+  // Nothing here may touch the network. entry() runs on whichever task
+  // made the transition, and several of the handle_ui_event() handlers
+  // that reach this state run on the UI task: a TLS handshake would be
+  // attempted on its far smaller stack, and it would put a second task on
+  // the one HTTPClient the main task owns. Draining happens in loop(),
+  // which only ever runs on the main task.
+  sm().bsl_input_.Stop();
 }
 
 void AppSMStates::CmdShutdownState::loop() {
-  // wait for timeout
-  if (millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DELAY) {
-#if defined(HAS_BUTTON_UI)
-    sm().bsl_input_.Stop();
-#elif defined(HAS_TOUCH_UI)
-    sm().touch_handler_.Stop();
-#endif
-    sm().network_.disconnect();
-    return transition_to<NetDisconnectingState>();
+  // Main task, so the webhook is safe to touch here.
+  sm()._service_webhook();
+
+  const bool connected =
+      sm().network_.get_state() == Network::State::W_CONNECTED;
+  const bool waited_min = millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DELAY;
+  const bool gave_up =
+      millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DRAIN_TIMEOUT;
+
+  // Hold the link until everything queued has gone out. The connect event
+  // is raised by the network task a moment after the link itself comes up,
+  // so a timer wake that reaches this state first would otherwise sleep
+  // without ever sending its heartbeat - and the heartbeat response is
+  // what keeps the clock fresh enough for the scheduled reset to run.
+  if (connected && sm()._webhook_pending() && !gave_up) return;
+  if (!waited_min) return;
+
+  if (sm()._webhook_pending()) {
+    sm().warning("shutting down with work still queued");
   }
+  // Past this point the link is going away, so a POST would only burn its
+  // retry budget on DNS failures. Anything undelivered is carried by the
+  // next event, which reports absolute counts.
+  sm().shutting_down_ = true;
+  sm().device_state_.save_all();
+  sm().network_.disconnect();
+  return transition_to<NetDisconnectingState>();
 }
 
 void AppSMStates::NetDisconnectingState::loop() {
-  bool conditions = true;
-  conditions =
-      conditions && sm().network_.get_state() == Network::State::DISCONNECTED;
-#if defined(HAS_DISPLAY)
-  conditions = conditions && !sm().display_.busy();
-#endif
-  if (conditions) {
-#if defined(HAS_DISPLAY)
-    if (sm().device_state_.flags().display_redraw) {
-      sm().device_state_.flags().display_redraw = false;
-      sm().display_.disp_main();
-    }
-    sm().display_.end();
-#endif
+  if (sm().network_.get_state() == Network::State::DISCONNECTED) {
     return transition_to<ShuttingDownState>();
   }
 }
 
 void AppSMStates::ShuttingDownState::loop() {
-  bool ended = true;
-#if defined(HAS_DISPLAY)
-  ended = ended && sm().display_.get_state() == Display::State::IDLE;
-#endif
-#if defined(HAS_BUTTON_UI)
-  ended = ended &&
-          sm().bsl_input_.cstate() == ComponentBase::ComponentState::kStopped &&
-          !sm().hw_.any_button_pressed();
-#endif
-#if defined(HAS_TOUCH_UI)
-  ended = ended && sm().touch_handler_.cstate() ==
-                       ComponentBase::ComponentState::kStopped;
-#endif
-  if (ended) {
-#ifdef HOME_BUTTONS_DEBUG
-    sm()._log_task_stats();
-#endif
-    if (sm().device_state_.flags().awake_mode) {
-      sm().device_state_.persisted().silent_restart = true;
-      sm().device_state_.save_all();
-      ESP.restart();
-    } else {
-#if defined(HAS_SLEEP_MODE)
-      sm()._go_to_sleep();
-#endif
-    }
+  if (sm().device_state_.flags().display_redraw) {
+    sm().device_state_.flags().display_redraw = false;
+    sm().display_.disp_main();
+    sm().display_.update();
   }
+  sm().display_.end();
+  delay(100);
+  sm()._go_to_sleep();
 }
 
 void AppSMStates::FactoryResetState::entry() {
   sm().info("factory reset...");
-  sm().network_.disconnect(true);  // erase login data
-#if defined(HAS_DISPLAY)
-  sm().display_.disp_message("Factory\nRESET...");
-  sm().display_.end();
-#else
-  sm().bsl_input_.LEDBlink(3, 10, 0, 200, 160, false);
-#endif
-#if defined(HOME_BUTTONS_ORIGINAL) || defined(HOME_BUTTONS_MINI)
-  sm().bsl_input_.Stop();
-#elif defined(HOME_BUTTONS_PRO)
-#endif
+  sm().display_.disp_message("Factory\nRESET", 0);
+  sm().device_state_.clear_all();
+  sm().network_.disconnect(true);
 }
 
 void AppSMStates::FactoryResetState::loop() {
-  bool conditions = true;
-  conditions =
-      conditions && sm().network_.get_state() == Network::State::DISCONNECTED;
-#if defined(HAS_DISPLAY)
-  conditions = conditions && sm().display_.get_state() == Display::State::IDLE;
-#endif
-  if (conditions) {
-    sm().device_state_.clear_all();
-    sm().info("factory reset complete.");
-    delay(5000);
+  if (sm().network_.get_state() == Network::State::DISCONNECTED) {
+    sm().display_.disp_message("Factory\nRESET\ncomplete", 3000);
+    sm().display_.update();
+    delay(3000);
+    sm().display_.end();
+    delay(1000);
     ESP.restart();
   }
 }

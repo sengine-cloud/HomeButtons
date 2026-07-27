@@ -15,18 +15,20 @@ using DeviceName = StaticString<20>;
 using ButtonLabel = StaticString<BTN_LABEL_MAXLEN>;
 using MDIName = StaticString<48>;
 using UserMessage = StaticString<USER_MSG_MAXLEN>;
-using BtnConfString = StaticString<16>;
 
-using TouchActionString = StaticString<16>;
-using ClickActionString = StaticString<16>;
-
-using TopicType = StaticString<MAX_TOPIC_LENGTH>;
-using PayloadType = StaticString<MQTT_PYLD_SIZE>;
+using EndpointUrlType = StaticString<ENDPOINT_URL_MAXLEN>;
+using AuthTokenType = StaticString<AUTH_TOKEN_MAXLEN>;
+using ResetSpecType = StaticString<RESET_SPEC_MAXLEN>;
+using BuildIdType = StaticString<BUILD_ID_MAXLEN>;
+using CountryCodeType = StaticString<WIFI_COUNTRY_MAXLEN>;
+using PayloadType = StaticString<HTTP_PAYLOAD_SIZE>;
 
 using SSIDType = StaticString<32>;
 using HostnameType = StaticString<32>;
 
-using IconServerType = StaticString<128>;
+// AP password is "HB-" + the 6-char eFuse random id, so 9 chars — comfortably
+// over the 8-char WPA2 minimum.
+using APPasswordType = StaticString<16>;
 
 enum class DisplayPage {
   EMPTY,
@@ -58,4 +60,4 @@ struct UIState {
 
 enum class LabelType : uint8_t { None, Text, Icon, Mixed };
 
-#endif  // HOMEBUTTONS_TYPES_H;
+#endif  // HOMEBUTTONS_TYPES_H

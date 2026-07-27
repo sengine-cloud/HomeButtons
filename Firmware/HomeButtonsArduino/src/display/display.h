@@ -1,6 +1,7 @@
 #ifndef HOMEBUTTONS_DISPLAY_H
 #define HOMEBUTTONS_DISPLAY_H
 
+#include <FS.h>
 #include <GxEPD2.h>
 #include <GxEPD2_BW.h>
 #include <U8g2_for_Adafruit_GFX.h>
@@ -8,12 +9,23 @@
 #include "static_string.h"
 #include "state.h"
 #include "logger.h"
-#include "mdi/mdi_helper.h"
 #include "types.h"
 
 // parameters for draw_bmp()
 static constexpr uint16_t input_buffer_pixels = 800;
 static constexpr uint16_t max_palette_pixels = 256;
+
+// Icons are pre-loaded into SPIFFS at flash time under /mdi/<size>/<name>.bmp.
+// Only the two sizes the Original layout uses are shipped.
+static constexpr uint16_t MDI_SIZE_LARGE = 64;
+static constexpr uint16_t MDI_SIZE_SMALL = 48;
+
+// Top edge of a full-size icon, per button row. Both columns of a row share
+// one value, so icons line up across the display. Text labels deliberately
+// do not use these - they are placed per button index, which staggers the
+// two columns - but a counter total is drawn as though it were an icon so
+// the numbers sit level with each other and with icons in the other rows.
+static constexpr uint16_t MDI_ROW_TOP_Y[3] = {17, 116, 215};
 
 struct HardwareDefinition;
 
@@ -21,14 +33,7 @@ class DeviceState;
 
 // display init stuff
 #define GxEPD2_DISPLAY_CLASS GxEPD2_BW
-
-#if defined(HOME_BUTTONS_ORIGINAL)
-#define GxEPD2_DRIVER_CLASS GxEPD2_290_T94_V2
-#elif defined(HOME_BUTTONS_MINI)
-#define GxEPD2_DRIVER_CLASS GxEPD2_154_D67
-#elif defined(HOME_BUTTONS_PRO)
-#define GxEPD2_DRIVER_CLASS GxEPD2_420_GDEY042T91
-#endif
+#define GxEPD2_DRIVER_CLASS GxEPD2_290_T94_V2  // 128x296
 
 #define MAX_DISPLAY_BUFFER_SIZE 65536ul  // e.g.
 #define MAX_HEIGHT(EPD)                                      \
@@ -37,12 +42,15 @@ class DeviceState;
        : MAX_DISPLAY_BUFFER_SIZE / (EPD::WIDTH / 8))
 
 class Display : public Logger {
-  friend class ButtonTile;
-
  public:
   enum class State { IDLE, ACTIVE, CMD_END, ENDING };
-  explicit Display(const DeviceState& device_state, MDIHelper& mdi_helper)
-      : Logger("Display"), device_state_(device_state), mdi_(mdi_helper) {}
+  // Build stamp read out of the SPIFFS image. Shown on the Device Info
+  // screen next to the firmware's own, so a mismatch is visible on the
+  // device rather than only in the serial log.
+  void set_spiffs_build(const char* build) { spiffs_build_ = build; }
+
+  explicit Display(DeviceState& device_state)
+      : Logger("Display"), device_state_(device_state) {}
   void begin(HardwareDefinition& HW);
   void end();
   void update();
@@ -74,12 +82,13 @@ class Display : public Logger {
 
   bool new_ui_cmd = false;
   bool redraw_in_progress = false;
+  bool spiffs_mounted_ = false;
+  StaticString<BUILD_ID_MAXLEN> spiffs_build_;
 
   uint16_t text_color = GxEPD_BLACK;
   uint16_t bg_color = GxEPD_WHITE;
 
-  const DeviceState& device_state_;
-  MDIHelper& mdi_;
+  DeviceState& device_state_;
 
   GxEPD2_DISPLAY_CLASS<GxEPD2_DRIVER_CLASS, MAX_HEIGHT(GxEPD2_DRIVER_CLASS)>*
       disp;
@@ -117,17 +126,10 @@ class Display : public Logger {
   void draw_white();
   void draw_black();
   bool draw_bmp(File& file, int16_t x, int16_t y);
+  // Opens the pre-loaded icon at /mdi/<size>/<name>.bmp. The returned File is
+  // falsy when the icon was not flashed. SPIFFS must already be mounted.
+  File open_mdi_file(const char* name, uint16_t size);
   void draw_mdi(const char* name, uint16_t size, int16_t x, int16_t y);
-};
-
-struct ButtonTile {
-  LabelType label_type = LabelType::None;
-  ButtonLabel text{};
-  MDIName mdi_name{};
-  uint16_t width = 0;
-  uint16_t height = 0;
-
-  void draw(Display& display, int16_t x, int16_t y, uint16_t color);
 };
 
 #endif  // HOMEBUTTONS_DISPLAY_H

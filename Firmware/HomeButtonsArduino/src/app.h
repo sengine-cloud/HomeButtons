@@ -2,26 +2,22 @@
 #define HOMEBUTTONS_APP_H
 
 #include <array>
+#include <atomic>
+#include "freertos/FreeRTOS.h"  // must precede queue.h
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "state.h"
 #include "network.h"
-#include "mqtt_helper.h"
-#include "topics.h"
+#include "webhook.h"
 #include "logger.h"
 #include "hardware.h"
 #include "setup.h"
-
-#if defined(HAS_DISPLAY)
+#ifdef HOME_BUTTONS_DEBUG
+#include "console.h"
+#endif
+#include "reset_schedule.h"
 #include "display/display.h"
-#include "mdi/mdi_helper.h"
-#endif
-
-#if defined(HAS_BUTTON_UI)
 #include "button_ui/btn_sw_led.h"
-#endif
-
-#if defined(HAS_TOUCH_UI)
-#include "touch/touch.h"
-#endif
 
 class App;
 
@@ -72,6 +68,25 @@ class NetConnectingState : public State<App> {
   void handle_ui_event(UserInput::Event event);
 
   const char* get_name() override { return "NetConnectingState"; }
+
+ private:
+  uint32_t start_time_ = 0;
+};
+
+// Battery-mode burst window. Entered once the first press has been
+// delivered; keeps Wi-Fi and the TLS session open so a run of presses
+// shares one association and one handshake. Exits to shutdown after
+// SESSION_IDLE_TIMEOUT with no user input.
+class SessionState : public State<App> {
+ public:
+  using State<App>::State;
+
+  void entry() override;
+  void exit() override;
+  void loop() override;
+  void handle_ui_event(UserInput::Event event);
+
+  const char* get_name() override { return "SessionState"; }
 };
 
 class InfoScreenState : public State<App> {
@@ -153,10 +168,10 @@ class FactoryResetState : public State<App> {
 using AppStateMachine = StateMachine<
     App, AppSMStates::InitState, AppSMStates::AwakeModeIdleState,
     AppSMStates::SleepModeHandleInput, AppSMStates::NetConnectingState,
-    AppSMStates::InfoScreenState, AppSMStates::SettingsMenuState,
-    AppSMStates::DeviceInfoState, AppSMStates::CmdShutdownState,
-    AppSMStates::NetDisconnectingState, AppSMStates::ShuttingDownState,
-    AppSMStates::FactoryResetState>;
+    AppSMStates::SessionState, AppSMStates::InfoScreenState,
+    AppSMStates::SettingsMenuState, AppSMStates::DeviceInfoState,
+    AppSMStates::CmdShutdownState, AppSMStates::NetDisconnectingState,
+    AppSMStates::ShuttingDownState, AppSMStates::FactoryResetState>;
 
 class App : public AppStateMachine, public Logger {
  public:
@@ -165,22 +180,17 @@ class App : public AppStateMachine, public Logger {
   void setup();
 
  private:
-#if defined(HAS_SLEEP_MODE)
   void _start_esp_sleep();
   void _go_to_sleep();
-#endif
   void _sleep_or_restart();
   std::pair<BootCause, int16_t> _determine_boot_cause();
   void _log_task_stats();
-  void _publish_system_state();
 
   static void _ui_task(void* app);
   void _start_ui_task();
 
-#if defined(HAS_DISPLAY)
   static void _display_task(void* app);
   void _start_display_task();
-#endif
 
   static void _network_task(void* app);
   void _start_network_task();
@@ -194,22 +204,75 @@ class App : public AppStateMachine, public Logger {
   void _start_tasks();
 
   void _handle_ui_event_global(UserInput::Event event);
-  void _publish_ui_event(UserInput::Event event);
-  void _mqtt_callback(const char* topic, const char* payload);
+  // Runs on the NETWORK task. Must not touch webhook_ - see
+  // _service_webhook().
   void _net_on_connect();
-#if defined(HAS_TH_SENSOR)
-  void _publish_sensors();
-#endif
-#if defined(HAS_BATTERY)
-  void _publish_battery();
-#endif
-#if defined(HAS_DISPLAY)
-  void _download_mdi_icons();
-#endif
+  // Everything that talks to webhook_, on the main task only. Webhook owns
+  // a single HTTPClient and WiFiClientSecure; _net_on_connect() fires from
+  // the network task while _flush_pending() runs here, so doing the
+  // on-connect work there would put two tasks on one TLS connection.
+  void _service_webhook();
+  // Redraws the main screen when a press has changed it. Driven from the
+  // main loop rather than from individual states, so the number on the
+  // display follows the button press regardless of what the state machine
+  // is doing - notably while the network is still connecting.
+  void _service_display();
+  // Drains the console's line queue. Same task as _service_webhook(), so a
+  // command may touch the webhook, NVS and the counters freely.
+  void _service_console();
+  // Tests the reset boundary on a timer. In sleep mode the wake itself is
+  // the trigger and the check at boot covers it, but a device left awake -
+  // anything on USB power with awake mode on - would otherwise not notice
+  // 03:00 passing until the next press or reconnect.
+  void _service_reset();
+  // True while anything is still waiting on the link: an unserviced connect
+  // event, a scheduled-reset report, or queued presses.
+  bool _webhook_pending() const;
+  // A press injected from the console. Applies it exactly as a real one,
+  // then nudges the state machine the way the UI callback would have -
+  // without which an injected press in sleep mode would sit in the queue
+  // until the idle timeout slept the device with it undelivered.
+  void _console_press(uint8_t btn_id);
 
-#if defined(HAS_AWAKE_MODE)
-  void _publish_awake_mode_avlb();
-#endif
+  // Counter plumbing ---------------------------------------------------
+  // Returns true and fills idx/delta when btn_id is one of the four
+  // counter buttons; false for the two unassigned buttons.
+  static bool _btn_to_counter(uint8_t btn_id, uint8_t& idx, int32_t& delta);
+  // Applies the press locally (counter, label, redraw) and either sends it
+  // straight away or queues it until the network is up.
+  void _handle_counter_press(uint8_t btn_id);
+  // Clears the counters when the configured reset boundary has been
+  // crossed. RAM only, so it is safe to call from the UI task: persistence
+  // rides along with the next save_all(). The clock survives deep sleep, so
+  // this can run before the network is up - and must, so that a press just
+  // after the boundary counts toward the new period rather than the old.
+  void _check_reset();
+  // Guards the counters, the reset period and the button labels, which the
+  // UI task mutates on a press and the main task reads, saves and resets.
+  // Recursive because _handle_counter_press() calls _check_reset().
+  class StateLock {
+   public:
+    explicit StateLock(SemaphoreHandle_t m) : m_(m) {
+      if (m_ != nullptr) xSemaphoreTakeRecursive(m_, portMAX_DELAY);
+    }
+    ~StateLock() {
+      if (m_ != nullptr) xSemaphoreGiveRecursive(m_);
+    }
+    StateLock(const StateLock&) = delete;
+
+   private:
+    SemaphoreHandle_t m_;
+  };
+  reset_schedule::Spec _reset_spec();
+  bool _clock_fresh() const;
+  // Seconds until the next boundary, into flags().schedule_wakeup_time.
+  void _schedule_next_wake();
+  // Reads /build.txt out of the SPIFFS image. Empty when the file is
+  // missing, which means the filesystem predates build stamping or was
+  // never flashed.
+  void _read_spiffs_build();
+  void _refresh_counter_labels();
+  void _flush_pending();
 
   DeviceState device_state_;
   TaskHandle_t ui_task_h_ = nullptr;
@@ -217,7 +280,6 @@ class App : public AppStateMachine, public Logger {
   TaskHandle_t network_task_h_ = nullptr;
   TaskHandle_t main_task_h_ = nullptr;
 
-#if defined(HOME_BUTTONS_ORIGINAL)
   BtnSwLED b1_;
   BtnSwLED b2_;
   BtnSwLED b3_;
@@ -225,55 +287,86 @@ class App : public AppStateMachine, public Logger {
   BtnSwLED b5_;
   BtnSwLED b6_;
   BtnSwLEDInput<NUM_BUTTONS> bsl_input_;
-#elif defined(HOME_BUTTONS_MINI)
-  BtnSwLED b1_;
-  BtnSwLED b2_;
-  BtnSwLED b3_;
-  BtnSwLED b4_;
-  BtnSwLEDInput<NUM_BUTTONS> bsl_input_;
-#elif defined(HOME_BUTTONS_INDUSTRIAL)
-  BtnSwLED b1_;
-  BtnSwLED b2_;
-  BtnSwLED b3_;
-  BtnSwLED b4_;
-  BtnSwLED sw_;
-  BtnSwLEDInput<NUM_BUTTONS> bsl_input_;
-#endif
-
-#if defined(HAS_TOUCH_UI)
-  TouchInput touch_handler_;
-#endif
 
   UserInput::Event user_event_ = {};
 
-#if defined(HAS_DISPLAY)
-  MDIHelper mdi_;
   Display display_;
-#endif
-  TopicHelper topics_;
   Network network_;
-  MQTTHelper mqtt_;
+  Webhook webhook_;
   HardwareDefinition hw_;
   HBSetup setup_;
+  // Debug builds only. The console can rewrite the endpoint and the auth
+  // token, and reopen the setup portal, with no authentication beyond
+  // physical access - and it costs ~4 KB of RAM that a release build on
+  // this part would rather keep.
+#ifdef HOME_BUTTONS_DEBUG
+  Console console_;
+#endif
+
+  // Button callbacks run on the UI task, so a press may not block on HTTP or
+  // NVS there. handle_ui_event() only touches RAM and pushes onto this queue;
+  // the main task drains it in _flush_pending(), which owns the NVS write and
+  // the POST.
+  static constexpr uint8_t PRESS_QUEUE_SIZE = 8;
+  struct PressQueueElement {
+    Webhook::Event event;
+    uint32_t queued_at;
+  };
+  QueueHandle_t press_queue_ = nullptr;
+
+  // Presses queued but not yet confirmed delivered, per button. Incremented
+  // on the UI task and decremented on the main task, hence atomic.
+  //
+  // The LED is only released when a button's count returns to zero. Without
+  // this, pressing the same button while its first press is still in flight
+  // would light the LED, then have the first press's 200 immediately clear
+  // it again - LED dark while a press was still pending.
+  std::array<std::atomic<uint8_t>, NUM_BUTTONS> inflight_{};
+  // Set if any press in the current burst failed, so the button can end on
+  // the error pattern rather than simply going dark.
+  std::array<std::atomic<bool>, NUM_BUTTONS> send_failed_{};
+
+  // Set when _check_reset() clears the counters, so the following connect
+  // reports it. RAM only: if the report is lost, the next press carries
+  // absolute counts and the receiver self-heals.
+  std::atomic<bool> reset_to_report_{false};
+  // Set by the network task when the link comes up; consumed by the main
+  // task, which owns webhook_.
+  std::atomic<bool> net_connected_event_{false};
+  // Latched once the shutdown path has commanded the link down. One-way:
+  // every route through CmdShutdownState ends in sleep or a restart.
+  bool shutting_down_ = false;
+  // Set by a console press, consumed by SleepModeHandleInput::loop() so the
+  // state transition happens on the main task rather than adding a second
+  // concurrent writer to the unsynchronised state machine.
+  std::atomic<bool> console_press_pending_{false};
+  // Console override for the next wake, in seconds. Exists so a sleep test
+  // cannot put the device beyond reach for hours when the schedule works
+  // out to a long sleep. 0 means use the schedule.
+  uint32_t forced_wake_seconds_ = 0;
+  SemaphoreHandle_t state_mutex_ = nullptr;
+  BuildIdType spiffs_build_;
 
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;
 
-  uint32_t last_sensor_publish_ = 0;
+  uint32_t last_reset_check_ = 0;
   uint32_t last_m_display_redraw_ = 0;
   uint32_t input_start_time_ = 0;
+  uint32_t session_last_input_time_ = 0;
   uint32_t info_screen_start_time_ = 0;
   uint32_t settings_menu_start_time_ = 0;
   uint32_t device_info_start_time_ = 0;
   uint32_t shutdown_cmd_time_ = 0;
 
-  friend class FactoryTest;
   friend class HBSetup;
+  friend class Console;
 
   friend class AppSMStates::InitState;
   friend class AppSMStates::AwakeModeIdleState;
   friend class AppSMStates::SleepModeHandleInput;
   friend class AppSMStates::NetConnectingState;
+  friend class AppSMStates::SessionState;
   friend class AppSMStates::InfoScreenState;
   friend class AppSMStates::SettingsMenuState;
   friend class AppSMStates::DeviceInfoState;

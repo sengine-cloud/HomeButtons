@@ -1,0 +1,157 @@
+name: firmware
+
+# Upstream had no firmware build in CI at all — only a docs deploy — which is
+# how its `pro_*` targets drifted into a state that could not compile. This is
+# the gate that stops that happening again.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # ADR-0007 Form 2. This repo is public, so it cannot reach the org ARC
+    # runners (the Default runner group sets allows_public_repositories=false)
+    # and cannot read CI_RUNNER_MODE, which is a private-visibility org var.
+    # The expression therefore resolves to ubuntu-latest today — free and
+    # unmetered for public repos — but picks up ARC automatically if this
+    # repo is ever made private. Keep it byte-identical to the ADR form so
+    # the org drift gate matches it.
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'arc' && (vars.SELF_HOSTED_LABEL || 'arc-se-org-shared') || 'ubuntu-latest' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # pre_script.py and make_icons.py stamp the short sha into the
+          # firmware and the SPIFFS image, so the checkout needs real git
+          # metadata rather than a detached blob.
+          fetch-depth: 0
+          # On a pull_request event the default checkout is a merge commit
+          # that exists nowhere in the branch, so a device would report a
+          # sha nobody can look up. Build the branch head instead. The
+          # trade-off is that CI tests the branch as-is rather than merged
+          # with the base, which is what a build stamp should describe.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # Artifact names carry the sha so successive downloads land as
+      # homebuttons-original-<sha>.zip instead of "firmware-original (3)".
+      - name: Build id
+        id: build_id
+        run: echo "sha=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The toolchain is ~1 GB and the ESP-IDF/Arduino build pulls it fresh
+      # on every cold runner, so this cache is most of the wall-clock time.
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('Firmware/HomeButtonsArduino/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      # make_icons.py rasterises the MDI SVGs listed in icons.txt. Normally
+      # already on the runner image; install only if it is not, rather than
+      # paying for an apt update on every run.
+      - name: Ensure ImageMagick
+        run: |
+          if ! command -v convert >/dev/null && ! command -v magick >/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick
+          fi
+          (magick -version || convert -version) 2>/dev/null | head -1
+
+      # Both environments are built and published. They are not
+      # interchangeable: original_debug routes the console to USB CDC and
+      # uses QIO flash mode, so it has its own bootloader.bin as well as its
+      # own firmware.bin.
+      # Host-side tests for the pure-logic modules. Runs before the firmware
+      # build because it is seconds rather than minutes, and a calendar bug
+      # here would otherwise only show up on a device weeks later.
+      - name: Unit tests
+        working-directory: Firmware/HomeButtonsArduino
+        run: pio test -e native
+
+      - name: Build firmware
+        working-directory: Firmware/HomeButtonsArduino
+        run: pio run -e original_release -e original_debug
+
+      - name: Build SPIFFS image
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          python tools/make_icons.py
+          pio run -e original_release -e original_debug -t buildfs
+
+      # The app partition was 95.8% full before this fork stripped MQTT and
+      # the icon downloader. Fail loudly rather than discovering at flash
+      # time that the image no longer fits.
+      - name: Check flash headroom
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          set -euo pipefail
+          LIMIT=$((0x1A0000))
+          FAIL=0
+          for ENV in original_release original_debug; do
+            SIZE=$(stat -c%s ".pio/build/${ENV}/firmware.bin")
+            PCT=$((SIZE * 100 / LIMIT))
+            echo "${ENV}: ${SIZE} of ${LIMIT} bytes (${PCT}%)"
+            echo "\`${ENV}\`: ${SIZE} / ${LIMIT} bytes (${PCT}%)" >> "$GITHUB_STEP_SUMMARY"
+            if [ "$PCT" -ge 90 ]; then
+              echo "::error::${ENV} firmware is ${PCT}% of the app partition"
+              FAIL=1
+            fi
+          done
+          exit "$FAIL"
+
+      # upload-artifact derives the archive layout from the common ancestor of
+      # its paths, so listing files by their build-tree location buries them
+      # under .pio/build/<env>/ in the download. Stage each environment into
+      # its own flat directory instead, so unzipping either artifact gives
+      # you the images side by side, ready to flash.
+      #
+      # Two artifacts rather than one with subdirectories: both environments
+      # produce a firmware.bin and a bootloader.bin, so a single flat
+      # directory cannot hold both, and subdirectories would reintroduce the
+      # nesting this exists to avoid.
+      - name: Stage flash images
+        working-directory: Firmware/HomeButtonsArduino
+        run: |
+          set -euo pipefail
+          for ENV in original_release original_debug; do
+            mkdir -p "dist/${ENV}"
+            cp ".pio/build/${ENV}/bootloader.bin" \
+               ".pio/build/${ENV}/partitions.bin" \
+               ".pio/build/${ENV}/ota_data_initial.bin" \
+               ".pio/build/${ENV}/firmware.bin" \
+               ".pio/build/${ENV}/spiffs.bin" \
+               partitions.csv \
+               data/build.txt \
+               "dist/${ENV}/"
+            echo "--- dist/${ENV} ---"
+            ls -l "dist/${ENV}"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebuttons-original-${{ steps.build_id.outputs.sha }}
+          path: Firmware/HomeButtonsArduino/dist/original_release/
+          if-no-files-found: error
+
+      # Console on USB CDC - flash this one when you want logs over the
+      # USB-C cable instead of the UART pins on the debug header.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebuttons-original-debug-${{ steps.build_id.outputs.sha }}
+          path: Firmware/HomeButtonsArduino/dist/original_debug/
+          if-no-files-found: error
