@@ -295,34 +295,20 @@ void App::_check_reset() {
   const int32_t period = reset_schedule::period_of(spec, local);
   const int32_t last = device_state_.last_reset_period();
 
-  if (last == 0) {
-    // First time the date has ever been known. Adopt the period without
-    // clearing, so setting up a device does not wipe a count it was just
-    // given.
-    device_state_.set_last_reset_period(period);
-    return;
-  }
-  if (period == last) return;
-
-  if (period < last) {
-    // Local time moved backwards: the receiver corrected a clock that had
-    // run fast, or the autumn DST step handed back an hour - which against
-    // a "daily 03:00" schedule lands exactly on the boundary.
-    //
-    // Leave last_reset_period alone rather than adopting the earlier value.
-    // Adopting would re-arm a boundary that has already fired, so crossing
-    // it again on the way forward would clear a second time and post a
-    // second report for one scheduled reset, wiping every press counted in
-    // between. Holding the high-water mark keeps the invariant that a
-    // period is cleared at most once.
-    //
-    // This is only safe because a change of schedule zeroes the stored
-    // period - see DeviceState::set_reset_spec(). Without that, a switch
-    // from daily to monthly would look like time running backwards and
-    // suppress resets indefinitely.
-    info("local time moved back (period %d -> %d), keeping %d", last, period,
-         last);
-    return;
+  // The rule itself lives in reset_schedule so it can be unit-tested; this
+  // function only carries it out.
+  switch (reset_schedule::decide(last, period)) {
+    case reset_schedule::Action::kNone:
+      return;
+    case reset_schedule::Action::kAdopt:
+      device_state_.set_last_reset_period(period);
+      return;
+    case reset_schedule::Action::kHold:
+      info("local time moved back (period %d -> %d), keeping %d", last, period,
+           last);
+      return;
+    case reset_schedule::Action::kClear:
+      break;
   }
 
   const bool had_counts = device_state_.clear_counters();

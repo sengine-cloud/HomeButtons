@@ -61,6 +61,22 @@ void format(const Spec& spec, char* out, size_t out_size);
 // Returns 0 for Mode::kOff, which never matches a stored non-zero period.
 int32_t period_of(const Spec& spec, time_t local_time);
 
+// What a period comparison means. Pulled out of App::_check_reset() so the
+// rule can be exercised on the host: the three cases below are subtle
+// enough that two of them shipped wrong, and neither was reachable from a
+// unit test while the decision lived inside a FreeRTOS task.
+enum class Action : uint8_t {
+  kNone,   // same period, nothing to do
+  kAdopt,  // no usable stored period - take this one without clearing
+  kHold,   // local time moved backwards - keep the stored period
+  kClear,  // boundary genuinely crossed
+};
+
+// stored_period is what the device last acted on, 0 if none (which is also
+// what a change of schedule leaves behind - see DeviceState::set_reset_spec).
+// current_period comes from period_of(); 0 means the schedule is off.
+Action decide(int32_t stored_period, int32_t current_period);
+
 // Seconds from local_time until the next boundary, clamped into the range
 // the deep sleep timer accepts. Returns 0 when the mode is off, meaning
 // "no scheduled wake, fall back to the heartbeat interval".

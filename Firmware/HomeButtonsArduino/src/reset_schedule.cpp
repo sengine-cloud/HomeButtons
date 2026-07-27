@@ -264,4 +264,29 @@ uint32_t seconds_until_next(const Spec& spec, time_t local_time) {
   return static_cast<uint32_t>(delta);
 }
 
+Action decide(int32_t stored_period, int32_t current_period) {
+  // Schedule off: period_of() yields 0, which must never match a stored
+  // period and must never clear.
+  if (current_period == 0) return Action::kNone;
+
+  // Nothing usable stored. Either the date has never been known, or the
+  // schedule was just changed and the stored value counts a different unit
+  // - days for daily, weeks for weekly, months for monthly. Adopt rather
+  // than clear, so setting a device up does not wipe a count it was just
+  // given.
+  if (stored_period == 0) return Action::kAdopt;
+
+  if (current_period == stored_period) return Action::kNone;
+
+  // Local time moved backwards: a clock correction, or the autumn DST step
+  // handing back an hour. Hold the stored period rather than adopting the
+  // earlier one. Adopting would re-arm a boundary that has already fired,
+  // so crossing it again on the way forward would clear a second time and
+  // post a second report for one scheduled reset, losing every count taken
+  // in between.
+  if (current_period < stored_period) return Action::kHold;
+
+  return Action::kClear;
+}
+
 }  // namespace reset_schedule

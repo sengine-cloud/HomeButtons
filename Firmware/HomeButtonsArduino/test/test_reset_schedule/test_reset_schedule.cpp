@@ -213,6 +213,78 @@ void test_next_wake_is_clamped() {
   TEST_ASSERT_TRUE(secs >= reset_schedule::kWakeMinSeconds);
 }
 
+// --- decide() ------------------------------------------------------------
+// Every case below is a defect that shipped, or the invariant that defect
+// broke. The rule used to live inside App::_check_reset(), where none of it
+// could be reached without hardware.
+
+void test_decide_same_period_does_nothing() {
+  TEST_ASSERT_TRUE(reset_schedule::decide(20661, 20661) ==
+                   reset_schedule::Action::kNone);
+}
+
+void test_decide_adopts_when_nothing_stored() {
+  // First boot with a known date, and the state left by a schedule change.
+  // Adopting rather than clearing keeps a count the device was just given.
+  TEST_ASSERT_TRUE(reset_schedule::decide(0, 20661) ==
+                   reset_schedule::Action::kAdopt);
+}
+
+void test_decide_clears_on_forward_crossing() {
+  TEST_ASSERT_TRUE(reset_schedule::decide(20661, 20662) ==
+                   reset_schedule::Action::kClear);
+}
+
+void test_decide_holds_when_time_moves_back() {
+  // Autumn DST, or a clock correction. Must not clear.
+  TEST_ASSERT_TRUE(reset_schedule::decide(20662, 20661) ==
+                   reset_schedule::Action::kHold);
+}
+
+void test_decide_never_clears_twice_for_one_boundary() {
+  // The defect: holding is worthless if the earlier period gets adopted,
+  // because the boundary is then re-armed and fires again on the way
+  // forward. Walk the DST sequence and count the clears.
+  int32_t stored = 20661;
+  int clears = 0;
+  const int32_t walk[] = {20662, 20661, 20662};  // 03:00, back to 02:00, 03:00
+  for (int32_t period : walk) {
+    switch (reset_schedule::decide(stored, period)) {
+      case reset_schedule::Action::kClear:
+        clears++;
+        stored = period;
+        break;
+      case reset_schedule::Action::kAdopt:
+        stored = period;
+        break;
+      default:
+        break;
+    }
+  }
+  TEST_ASSERT_EQUAL_INT(1, clears);
+  TEST_ASSERT_EQUAL_INT32(20662, stored);
+}
+
+void test_decide_off_never_clears() {
+  // period_of() returns 0 for a disabled schedule, and 0 must not read as
+  // a boundary crossing however large the stored period is.
+  TEST_ASSERT_TRUE(reset_schedule::decide(20661, 0) ==
+                   reset_schedule::Action::kNone);
+  TEST_ASSERT_TRUE(reset_schedule::decide(0, 0) ==
+                   reset_schedule::Action::kNone);
+}
+
+void test_decide_handles_a_change_of_schedule_unit() {
+  // daily counts days (~20661), monthly counts months (~678). Compared
+  // directly, the new period looks like time running backwards and resets
+  // would be suppressed indefinitely - so set_reset_spec() zeroes the
+  // stored period, and this is what decide() must then see.
+  TEST_ASSERT_TRUE(reset_schedule::decide(20661, 678) ==
+                   reset_schedule::Action::kHold);
+  TEST_ASSERT_TRUE(reset_schedule::decide(0, 678) ==
+                   reset_schedule::Action::kAdopt);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_parse_daily);
@@ -234,5 +306,12 @@ int main(int, char**) {
   RUN_TEST(test_seconds_until_next_daily);
   RUN_TEST(test_next_wake_lands_in_the_next_period);
   RUN_TEST(test_next_wake_is_clamped);
+  RUN_TEST(test_decide_same_period_does_nothing);
+  RUN_TEST(test_decide_adopts_when_nothing_stored);
+  RUN_TEST(test_decide_clears_on_forward_crossing);
+  RUN_TEST(test_decide_holds_when_time_moves_back);
+  RUN_TEST(test_decide_never_clears_twice_for_one_boundary);
+  RUN_TEST(test_decide_off_never_clears);
+  RUN_TEST(test_decide_handles_a_change_of_schedule_unit);
   return UNITY_END();
 }
