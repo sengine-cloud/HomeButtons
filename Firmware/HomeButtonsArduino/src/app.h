@@ -325,6 +325,10 @@ class App : public AppStateMachine, public Logger {
   // Latched once the shutdown path has commanded the link down. One-way:
   // every route through CmdShutdownState ends in sleep or a restart.
   bool shutting_down_ = false;
+  // Console override for the next wake, in seconds. Exists so a sleep test
+  // cannot put the device beyond reach for hours when the schedule works
+  // out to a long sleep. 0 means use the schedule.
+  uint32_t forced_wake_seconds_ = 0;
   SemaphoreHandle_t state_mutex_ = nullptr;
   BuildIdType spiffs_build_;
 

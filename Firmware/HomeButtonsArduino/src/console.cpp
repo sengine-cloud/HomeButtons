@@ -28,7 +28,8 @@ const Console::Command Console::kCommands[] = {
     {"wifi", "", "link detail", &Console::_cmd_wifi},
     {"awake", "[0|1]", "show or set awake mode", &Console::_cmd_awake},
     {"save", "", "persist NVS now", &Console::_cmd_save},
-    {"sleep", "", "sleep immediately", &Console::_cmd_sleep},
+    {"sleep", "[secs]", "sleep now, optionally forcing the wake",
+     &Console::_cmd_sleep},
     {"restart", "", "reboot", &Console::_cmd_restart},
     {"setup", "", "reboot into the full setup portal", &Console::_cmd_setup},
     {"wifisetup", "", "reboot into the Wi-Fi portal", &Console::_cmd_wifisetup},
@@ -419,8 +420,14 @@ void Console::_cmd_save(int, char**) {
   _out("saved\n");
 }
 
-void Console::_cmd_sleep(int, char**) {
-  _out("sleeping\n");
+void Console::_cmd_sleep(int argc, char** argv) {
+  if (argc >= 2) {
+    app_.forced_wake_seconds_ =
+        static_cast<uint32_t>(strtoul(argv[1], nullptr, 10));
+    _out("sleeping, wake in %u s\n", app_.forced_wake_seconds_);
+  } else {
+    _out("sleeping\n");
+  }
   app_.transition_to<AppSMStates::CmdShutdownState>();
 }
 

@@ -341,7 +341,22 @@ void App::_read_spiffs_build() {
 
 void App::_schedule_next_wake() {
   device_state_.flags().schedule_wakeup_time = 0;
-  if (!device_state_.clock_valid()) return;
+
+  if (forced_wake_seconds_ > 0) {
+    device_state_.flags().schedule_wakeup_time = forced_wake_seconds_;
+    info("forced wake in %u s", forced_wake_seconds_);
+    return;
+  }
+
+  // Same test _check_reset() uses, not the weaker clock_valid(). A reset
+  // that has been suspended for want of a trustworthy clock must not still
+  // schedule a wake off that clock: after a hard reset, system time is back
+  // at 1970 while last_time_sync is a real epoch, and the arithmetic below
+  // produced a plausible-looking seven hour sleep from it.
+  //
+  // Falling through to zero here means the heartbeat interval is used
+  // instead, and the heartbeat is what re-syncs the clock.
+  if (!_clock_fresh()) return;
 
   const reset_schedule::Spec spec = _reset_spec();
   if (spec.mode == reset_schedule::Mode::kOff) return;
@@ -468,8 +483,13 @@ void App::_service_webhook() {
     const bool have_presses =
         press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
     const time_t now = time(nullptr);
+    // !_clock_fresh() rather than !clock_valid(): after a hard reset system
+    // time is back at 1970 while last_time_sync still holds a real epoch,
+    // which makes the subtraction below a large negative number - never
+    // greater than the resync interval, so the device would decide its
+    // clock was current and never ask for the time again.
     const bool clock_old =
-        !device_state_.clock_valid() ||
+        !_clock_fresh() ||
         (now - static_cast<time_t>(device_state_.last_time_sync())) >
             static_cast<time_t>(CLOCK_RESYNC_SECONDS);
 
