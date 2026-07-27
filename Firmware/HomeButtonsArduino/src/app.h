@@ -218,6 +218,11 @@ class App : public AppStateMachine, public Logger {
   // Drains the console's line queue. Same task as _service_webhook(), so a
   // command may touch the webhook, NVS and the counters freely.
   void _service_console();
+  // Tests the reset boundary on a timer. In sleep mode the wake itself is
+  // the trigger and the check at boot covers it, but a device left awake -
+  // anything on USB power with awake mode on - would otherwise not notice
+  // 03:00 passing until the next press or reconnect.
+  void _service_reset();
   // A press injected from the console. Applies it exactly as a real one,
   // then nudges the state machine the way the UI callback would have -
   // without which an injected press in sleep mode would sit in the queue
@@ -323,6 +328,7 @@ class App : public AppStateMachine, public Logger {
   BootCause boot_cause_;
   uint8_t wakeup_btn_id_ = 0;
 
+  uint32_t last_reset_check_ = 0;
   uint32_t last_m_display_redraw_ = 0;
   uint32_t input_start_time_ = 0;
   uint32_t session_last_input_time_ = 0;

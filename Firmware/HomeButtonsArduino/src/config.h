@@ -99,6 +99,9 @@ static constexpr char WIFI_COUNTRY_DFLT[] = "";
 //     off | daily 03:00 | weekly mon 03:00 | monthly 1 03:00
 static constexpr size_t RESET_SPEC_MAXLEN = 24;
 static constexpr char RESET_SPEC_DFLT[] = "daily 03:00";
+// How often a device that stays awake re-tests the reset boundary. Only
+// bounds how late the clear can be, so seconds are plenty fine-grained.
+static constexpr uint32_t RESET_CHECK_INTERVAL = 10000L;
 // The device has no trustworthy clock of its own; it is set from the `ts`
 // and `tz_offset` the webhook returns. If the last successful sync is
 // older than this, skip the reset rather than act on a drifting clock -

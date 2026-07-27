@@ -496,6 +496,17 @@ void App::_handle_ui_event_global(UserInput::Event event) {
 
 void App::_service_console() { console_.service(); }
 
+void App::_service_reset() {
+  if (millis() - last_reset_check_ < RESET_CHECK_INTERVAL) return;
+  last_reset_check_ = millis();
+
+  const int32_t before = device_state_.last_reset_period();
+  _check_reset();
+  // Only on an actual crossing: _schedule_next_wake() logs, and this runs
+  // for as long as the device stays awake.
+  if (device_state_.last_reset_period() != before) _schedule_next_wake();
+}
+
 void App::_console_press(uint8_t btn_id) {
   _handle_counter_press(btn_id);
   device_state_.flags().last_user_input_time = millis();
@@ -771,6 +782,7 @@ void App::_main_task() {
   while (true) {
     loop();
     _service_console();
+    _service_reset();
     _service_webhook();
     _service_display();
     esp_task_wdt_reset();
