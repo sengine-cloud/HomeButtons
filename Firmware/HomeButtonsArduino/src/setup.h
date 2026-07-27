@@ -22,7 +22,6 @@ class HBSetup : public Logger {
   // loop only exits on a connection attempt, a button, or the 600s
   // timeout, so a region entered and saved on its own was never read.
   void save_wifi_params_callback();
-  bool wifi_region_changed_ = false;
 };
 
 #endif  // HOMEBUTTONS_SETUP_H
