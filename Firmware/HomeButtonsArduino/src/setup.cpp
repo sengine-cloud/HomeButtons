@@ -324,7 +324,13 @@ void HBSetup::start_setup() {
   wifi_manager.addParameter(&auth_token_param);
   wifi_manager.addParameter(&awake_mode_param);
   wifi_manager.addParameter(&reset_spec_param);
-  wifi_manager.addParameter(&wifi_country_param);
+  // Wi-Fi Country is deliberately not here. This portal calls
+  // setParamsPage(true), which puts every parameter on a page of its own,
+  // away from the network list and the password field - so a Wi-Fi setting
+  // would sit among the webhook URL and the button labels. It belongs in
+  // the Wi-Fi portal (settings, button 2), where parameters render on the
+  // same page as the scan results, which is also where you are standing
+  // when you notice a network missing from that list.
   wifi_manager.addParameter(&static_ip_param);
   wifi_manager.addParameter(&gateway_param);
   wifi_manager.addParameter(&subnet_param);
