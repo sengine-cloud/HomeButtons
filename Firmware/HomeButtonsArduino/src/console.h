@@ -82,6 +82,7 @@ class Console : public Logger {
   void _cmd_endpoint(int argc, char** argv);
   void _cmd_token(int argc, char** argv);
   void _cmd_wifi(int argc, char** argv);
+  void _cmd_awake(int argc, char** argv);
   void _cmd_save(int argc, char** argv);
   void _cmd_sleep(int argc, char** argv);
   void _cmd_restart(int argc, char** argv);

@@ -26,6 +26,7 @@ const Console::Command Console::kCommands[] = {
      &Console::_cmd_endpoint},
     {"token", "[tok]", "show or set the auth token", &Console::_cmd_token},
     {"wifi", "", "link detail", &Console::_cmd_wifi},
+    {"awake", "[0|1]", "show or set awake mode", &Console::_cmd_awake},
     {"save", "", "persist NVS now", &Console::_cmd_save},
     {"sleep", "", "sleep immediately", &Console::_cmd_sleep},
     {"restart", "", "reboot", &Console::_cmd_restart},
@@ -396,6 +397,20 @@ void Console::_cmd_wifi(int, char**) {
   _out("ip        %s\n", app_.device_state_.ip());
   _out("country   applied '%s', configured '%s'\n", country,
        app_.device_state_.wifi_country().c_str());
+}
+
+void Console::_cmd_awake(int argc, char** argv) {
+  App::StateLock lock(app_.state_mutex_);
+  DeviceState& st = app_.device_state_;
+  if (argc >= 2) {
+    st.persisted().user_awake_mode = strtol(argv[1], nullptr, 10) != 0;
+    st.save_all();
+  }
+  // Setting this to 0 lets the device deep sleep, which takes the USB CDC
+  // down with it. UART0 on the debug header survives, and the console is
+  // up early enough in boot to catch a command sent during a wake.
+  _out("awake     user %d, effective %d\n", st.persisted().user_awake_mode,
+       st.flags().awake_mode);
 }
 
 void Console::_cmd_save(int, char**) {
