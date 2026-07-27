@@ -295,6 +295,21 @@ void App::_check_reset() {
   }
   if (period == last) return;
 
+  if (period < last) {
+    // Local time moved backwards. Two ways that happens in practice: the
+    // receiver corrected a clock the device had run fast, or the autumn DST
+    // step handed back an hour - which for a "daily 03:00" schedule lands
+    // exactly on the boundary and would otherwise clear the counters a
+    // second and third time on the way through.
+    //
+    // The period being re-entered has already had its reset, so adopt it
+    // without clearing. A genuine forward crossing still fires below.
+    info("local time moved back (period %d -> %d), adopting without clearing",
+         last, period);
+    device_state_.set_last_reset_period(period);
+    return;
+  }
+
   const bool had_counts = device_state_.clear_counters();
   device_state_.set_last_reset_period(period);
   _refresh_counter_labels();
