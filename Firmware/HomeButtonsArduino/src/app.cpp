@@ -455,6 +455,11 @@ void App::_net_on_connect() {
 
 // MAIN task. Sole owner of webhook_.
 void App::_service_webhook() {
+  // The network state only flips to DISCONNECTED once the network task
+  // gets round to it, so W_CONNECTED stays true for a few ms after the
+  // shutdown path has commanded the link down - long enough to start a
+  // POST that cannot possibly succeed.
+  if (shutting_down_) return;
   if (network_.get_state() != Network::State::W_CONNECTED) return;
 
   if (net_connected_event_.exchange(false)) {
@@ -1190,8 +1195,16 @@ void AppSMStates::DeviceInfoState::handle_ui_event(UserInput::Event event) {
 
 void AppSMStates::CmdShutdownState::entry() {
   sm().shutdown_cmd_time_ = millis();
-  // Anything still queued has to go out before the link drops.
-  sm()._flush_pending();
+  // Anything still queued has to go out before the link drops - presses,
+  // the scheduled-reset report and the heartbeat alike. Flushing only the
+  // presses here left the other two to _service_webhook(), which runs
+  // after loop() and so started its POST against a link this entry had
+  // already commanded down: three retries, ~22 s awake, notification lost.
+  sm()._service_webhook();
+  // Past this point the link is going away, so a POST would only burn the
+  // retry budget on DNS failures. Anything undelivered is reported again
+  // by the next event, which carries absolute counts.
+  sm().shutting_down_ = true;
   sm().device_state_.save_all();
   sm().network_.disconnect();
   sm().bsl_input_.Stop();

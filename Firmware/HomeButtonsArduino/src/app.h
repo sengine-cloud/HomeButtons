@@ -322,6 +322,9 @@ class App : public AppStateMachine, public Logger {
   // Set by the network task when the link comes up; consumed by the main
   // task, which owns webhook_.
   std::atomic<bool> net_connected_event_{false};
+  // Latched once the shutdown path has commanded the link down. One-way:
+  // every route through CmdShutdownState ends in sleep or a restart.
+  bool shutting_down_ = false;
   SemaphoreHandle_t state_mutex_ = nullptr;
   BuildIdType spiffs_build_;
 
