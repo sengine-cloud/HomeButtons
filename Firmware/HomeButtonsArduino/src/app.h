@@ -223,6 +223,9 @@ class App : public AppStateMachine, public Logger {
   // anything on USB power with awake mode on - would otherwise not notice
   // 03:00 passing until the next press or reconnect.
   void _service_reset();
+  // True while anything is still waiting on the link: an unserviced connect
+  // event, a scheduled-reset report, or queued presses.
+  bool _webhook_pending() const;
   // A press injected from the console. Applies it exactly as a real one,
   // then nudges the state machine the way the UI callback would have -
   // without which an injected press in sleep mode would sit in the queue
@@ -325,6 +328,10 @@ class App : public AppStateMachine, public Logger {
   // Latched once the shutdown path has commanded the link down. One-way:
   // every route through CmdShutdownState ends in sleep or a restart.
   bool shutting_down_ = false;
+  // Set by a console press, consumed by SleepModeHandleInput::loop() so the
+  // state transition happens on the main task rather than adding a second
+  // concurrent writer to the unsynchronised state machine.
+  std::atomic<bool> console_press_pending_{false};
   // Console override for the next wake, in seconds. Exists so a sleep test
   // cannot put the device beyond reach for hours when the schedule works
   // out to a long sleep. 0 means use the schedule.

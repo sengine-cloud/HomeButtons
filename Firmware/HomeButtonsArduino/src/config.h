@@ -138,6 +138,10 @@ static constexpr uint32_t AWAKE_REDRAW_INTERVAL = 1000L;      // ms
 static constexpr uint32_t SETTINGS_MENU_TIMEOUT = 30000L;     // ms
 static constexpr uint32_t DEVICE_INFO_TIMEOUT = 30000L;       // ms
 static constexpr uint32_t SHUTDOWN_DELAY = 500L;              // ms
+// How long the shutdown path will hold the link open waiting for queued
+// work to go out. Long enough for one send to exhaust its retries, short
+// enough not to dominate a wake on battery.
+static constexpr uint32_t SHUTDOWN_DRAIN_TIMEOUT = 35000L;    // ms
 static constexpr uint32_t SLEEP_MODE_INPUT_TIMEOUT = 10000L;  // ms
 
 // How long the device stays awake with the connection open after a press,

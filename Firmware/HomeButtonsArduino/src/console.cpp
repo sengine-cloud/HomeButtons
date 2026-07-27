@@ -4,6 +4,7 @@
 #include <esp_wifi.h>
 #include <stdarg.h>
 #include <string.h>
+#include <esp_task_wdt.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -112,6 +113,11 @@ void Console::service() {
   Line line;
   while (xQueueReceive(line_queue_, &line, 0) == pdTRUE) {
     _execute(line.text);
+    // `post` and `sync` each block for HTTP_MAX_ATTEMPTS * HTTP_TIMEOUT
+    // against an unreachable receiver. Two of them pasted together outlast
+    // WDT_TIMEOUT_AWAKE, and the main loop's own feed is not reached until
+    // the whole queue has drained.
+    esp_task_wdt_reset();
   }
 }
 
@@ -272,12 +278,10 @@ void Console::_cmd_sched(int argc, char** argv) {
       _out("try: off | daily 03:00 | weekly mon 03:00 | monthly 1 03:00\n");
       return;
     }
+    // set_reset_spec() zeroes the stored period itself, so the next check
+    // re-adopts rather than comparing across two definitions of "period".
     st.set_reset_spec(spec);
     st.save_all();
-    // The stored period belongs to the old schedule; keeping it would make
-    // the next check compare across two different definitions of "period"
-    // and clear the counters for no reason. Re-adopt instead.
-    st.set_last_reset_period(0);
     app_._check_reset();
     app_._schedule_next_wake();
   }
@@ -297,6 +301,10 @@ void Console::_cmd_reset(int, char**) {
 }
 
 void Console::_cmd_time(int argc, char** argv) {
+  // Guards the NVS write below against the UI task's press handler, which
+  // mutates the same persisted blob. `time set` is the command most likely
+  // to be typed while someone is pressing buttons to test a boundary.
+  App::StateLock lock(app_.state_mutex_);
   DeviceState& st = app_.device_state_;
 
   if (argc >= 3 && strcasecmp(argv[1], "set") == 0) {
@@ -364,6 +372,7 @@ void Console::_cmd_post(int, char**) {
 }
 
 void Console::_cmd_endpoint(int argc, char** argv) {
+  App::StateLock lock(app_.state_mutex_);
   DeviceState& st = app_.device_state_;
   if (argc >= 2) {
     st.set_endpoint_url(EndpointUrlType(argv[1]));
@@ -377,6 +386,7 @@ void Console::_cmd_endpoint(int argc, char** argv) {
 }
 
 void Console::_cmd_token(int argc, char** argv) {
+  App::StateLock lock(app_.state_mutex_);
   DeviceState& st = app_.device_state_;
   if (argc >= 2) {
     st.set_auth_token(AuthTokenType(argv[1]));

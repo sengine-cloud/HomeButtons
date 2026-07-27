@@ -197,7 +197,15 @@ class DeviceState : public Logger {
     return user_preferences_.reset_spec;
   }
   void set_reset_spec(const ResetSpecType& spec) {
+    if (user_preferences_.reset_spec == spec) return;
     user_preferences_.reset_spec = spec;
+    // A stored period only means anything under the schedule that produced
+    // it: period_of() counts days for daily but weeks for weekly and months
+    // for monthly, so the same instant maps to ~20600, ~2943 or ~678. Left
+    // alone across a mode change, the comparison in _check_reset() is
+    // between two different units. Zeroing here re-adopts on the next check
+    // rather than leaving it to each caller to remember.
+    persisted_.last_reset_period = 0;
   }
 
   // Clock -------------------------------------------------------------

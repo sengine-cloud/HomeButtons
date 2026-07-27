@@ -59,7 +59,16 @@ void App::_sleep_or_restart() {
 
 void App::_start_esp_sleep() {
   esp_sleep_enable_ext1_wakeup(hw_.WAKE_BITMASK, ESP_EXT1_WAKEUP_ANY_HIGH);
-  if (device_state_.persisted().wifi_done &&
+  if (forced_wake_seconds_ > 0) {
+    // Console override, deliberately outside the conditions below. The
+    // states those exclude - low battery, check_connection - are exactly
+    // the ones worth debugging over serial, and the console reports a wake
+    // time it must therefore actually arm. Sleeping there with no timer
+    // leaves the device recoverable only by hand, which is what the
+    // override exists to avoid.
+    esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(forced_wake_seconds_) *
+                                  1000000ULL);
+  } else if (device_state_.persisted().wifi_done &&
       device_state_.persisted().setup_done &&
       !device_state_.persisted().low_batt_mode &&
       !device_state_.persisted().check_connection) {
@@ -296,17 +305,23 @@ void App::_check_reset() {
   if (period == last) return;
 
   if (period < last) {
-    // Local time moved backwards. Two ways that happens in practice: the
-    // receiver corrected a clock the device had run fast, or the autumn DST
-    // step handed back an hour - which for a "daily 03:00" schedule lands
-    // exactly on the boundary and would otherwise clear the counters a
-    // second and third time on the way through.
+    // Local time moved backwards: the receiver corrected a clock that had
+    // run fast, or the autumn DST step handed back an hour - which against
+    // a "daily 03:00" schedule lands exactly on the boundary.
     //
-    // The period being re-entered has already had its reset, so adopt it
-    // without clearing. A genuine forward crossing still fires below.
-    info("local time moved back (period %d -> %d), adopting without clearing",
-         last, period);
-    device_state_.set_last_reset_period(period);
+    // Leave last_reset_period alone rather than adopting the earlier value.
+    // Adopting would re-arm a boundary that has already fired, so crossing
+    // it again on the way forward would clear a second time and post a
+    // second report for one scheduled reset, wiping every press counted in
+    // between. Holding the high-water mark keeps the invariant that a
+    // period is cleared at most once.
+    //
+    // This is only safe because a change of schedule zeroes the stored
+    // period - see DeviceState::set_reset_spec(). Without that, a switch
+    // from daily to monthly would look like time running backwards and
+    // suppress resets indefinitely.
+    info("local time moved back (period %d -> %d), keeping %d", last, period,
+         last);
     return;
   }
 
@@ -526,15 +541,34 @@ void App::_handle_ui_event_global(UserInput::Event event) {
 
 void App::_service_console() { console_.service(); }
 
+bool App::_webhook_pending() const {
+  // The connect event counts as outstanding work: it is what triggers the
+  // heartbeat and the time sync, and the network task raises it a little
+  // after the link comes up.
+  if (net_connected_event_.load()) return true;
+  if (reset_to_report_.load()) return true;
+  return press_queue_ != nullptr && uxQueueMessagesWaiting(press_queue_) > 0;
+}
+
 void App::_service_reset() {
   if (millis() - last_reset_check_ < RESET_CHECK_INTERVAL) return;
   last_reset_check_ = millis();
 
   const int32_t before = device_state_.last_reset_period();
   _check_reset();
+  if (device_state_.last_reset_period() == before) return;
+
   // Only on an actual crossing: _schedule_next_wake() logs, and this runs
   // for as long as the device stays awake.
-  if (device_state_.last_reset_period() != before) _schedule_next_wake();
+  _schedule_next_wake();
+  // And persist. Every other caller of _check_reset() is followed by a save
+  // - _flush_pending() after a press, _go_to_sleep() on the way down - but
+  // a device left awake crosses the boundary with nobody around to press
+  // anything. Without this, the receiver is told the counters are zero
+  // while NVS still holds yesterday's values, and the next boot clears and
+  // reports a second time for the same boundary.
+  StateLock lock(state_mutex_);
+  device_state_.save_all();
 }
 
 void App::_console_press(uint8_t btn_id) {
@@ -543,13 +577,14 @@ void App::_console_press(uint8_t btn_id) {
   // Keeps an open session open, mirroring SessionState::handle_ui_event().
   session_last_input_time_ = millis();
 
-  // In sleep mode the device parks in SleepModeHandleInput waiting for a
-  // real button, and nothing there connects the network. Boot cause is left
-  // alone: if the wake really was a timer, NetConnectingState will deliver
-  // the press and then sleep, which is the honest outcome.
-  if (is_current_state<AppSMStates::SleepModeHandleInput>()) {
-    transition_to<AppSMStates::NetConnectingState>();
-  }
+  // Deliberately not transitioning from here. The state machine is
+  // unsynchronised and the UI task drives it too, so a second concurrent
+  // transition source would let a console press racing a real one run
+  // exit()/entry() twice - re-binding the button callback and restarting a
+  // connect already in flight. SleepModeHandleInput::loop() picks this up
+  // instead, on the main task, where its own timeout transition already
+  // happens.
+  console_press_pending_ = true;
 }
 
 void App::_service_display() {
@@ -929,6 +964,12 @@ void AppSMStates::SleepModeHandleInput::exit() {
 }
 
 void AppSMStates::SleepModeHandleInput::loop() {
+  // A press injected from the console. Nothing in this state connects the
+  // network, so without this it would sit in the queue until the timeout
+  // below slept the device with it undelivered.
+  if (sm().console_press_pending_.exchange(false)) {
+    return transition_to<NetConnectingState>();
+  }
   if (millis() - sm().input_start_time_ > SLEEP_MODE_INPUT_TIMEOUT) {
     return transition_to<CmdShutdownState>();
   }
@@ -1220,25 +1261,43 @@ void AppSMStates::DeviceInfoState::handle_ui_event(UserInput::Event event) {
 
 void AppSMStates::CmdShutdownState::entry() {
   sm().shutdown_cmd_time_ = millis();
-  // Anything still queued has to go out before the link drops - presses,
-  // the scheduled-reset report and the heartbeat alike. Flushing only the
-  // presses here left the other two to _service_webhook(), which runs
-  // after loop() and so started its POST against a link this entry had
-  // already commanded down: three retries, ~22 s awake, notification lost.
-  sm()._service_webhook();
-  // Past this point the link is going away, so a POST would only burn the
-  // retry budget on DNS failures. Anything undelivered is reported again
-  // by the next event, which carries absolute counts.
-  sm().shutting_down_ = true;
-  sm().device_state_.save_all();
-  sm().network_.disconnect();
+  // Nothing here may touch the network. entry() runs on whichever task
+  // made the transition, and several of the handle_ui_event() handlers
+  // that reach this state run on the UI task: a TLS handshake would be
+  // attempted on its far smaller stack, and it would put a second task on
+  // the one HTTPClient the main task owns. Draining happens in loop(),
+  // which only ever runs on the main task.
   sm().bsl_input_.Stop();
 }
 
 void AppSMStates::CmdShutdownState::loop() {
-  if (millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DELAY) {
-    return transition_to<NetDisconnectingState>();
+  // Main task, so the webhook is safe to touch here.
+  sm()._service_webhook();
+
+  const bool connected =
+      sm().network_.get_state() == Network::State::W_CONNECTED;
+  const bool waited_min = millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DELAY;
+  const bool gave_up =
+      millis() - sm().shutdown_cmd_time_ > SHUTDOWN_DRAIN_TIMEOUT;
+
+  // Hold the link until everything queued has gone out. The connect event
+  // is raised by the network task a moment after the link itself comes up,
+  // so a timer wake that reaches this state first would otherwise sleep
+  // without ever sending its heartbeat - and the heartbeat response is
+  // what keeps the clock fresh enough for the scheduled reset to run.
+  if (connected && sm()._webhook_pending() && !gave_up) return;
+  if (!waited_min) return;
+
+  if (sm()._webhook_pending()) {
+    sm().warning("shutting down with work still queued");
   }
+  // Past this point the link is going away, so a POST would only burn its
+  // retry budget on DNS failures. Anything undelivered is carried by the
+  // next event, which reports absolute counts.
+  sm().shutting_down_ = true;
+  sm().device_state_.save_all();
+  sm().network_.disconnect();
+  return transition_to<NetDisconnectingState>();
 }
 
 void AppSMStates::NetDisconnectingState::loop() {
