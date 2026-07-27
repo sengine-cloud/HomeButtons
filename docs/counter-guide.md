@@ -89,6 +89,26 @@ succeeds. In a script, retry:
 for i in 1 2 3; do esptool ... && break; sleep 3; done
 ```
 
+Not every esptool failure is that one, and retrying the wrong one gets you
+nowhere:
+
+| Error | Means | Do |
+|---|---|---|
+| `No such device`, `Failed to connect` | The CDC device re-enumerated underneath esptool during its own reset | Run it again |
+| `Write timeout` | The chip is not accepting writes at all, usually a stub flasher left running by an earlier command that died partway | Reset the chip. Retrying will not help |
+| `Unable to verify flash chip connection` right after `Changing baud rate` | The link cannot carry the requested rate. Almost always a serial adapter | Drop `--baud`, and use the Espressif port |
+
+`--before no-reset` is only safe when you know the chip is freshly in
+download mode. The USB product string does not tell you that: a chip
+running an abandoned stub looks the same from the host as one sitting in a
+clean ROM bootloader. `--before default-reset` costs nothing and recovers
+both, so prefer it unless you have a reason not to.
+
+A chip reset means unplugging the USB-C cable, or holding BOOT while
+tapping RST. Resetting the USB device from the host does not do it, and
+deauthorising the port can drop the device off the bus entirely, leaving
+the cable as the only way back.
+
 Or from a checkout: `pio run -e original_release -t upload -t uploadfs`.
 
 **Erase first if the device previously ran stock firmware.** NVS survives a
