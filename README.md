@@ -27,9 +27,9 @@ MQTT and Home Assistant integration have been removed entirely.
 ## How it works
 
 ```
-press +  ──▶  LED blinks immediately (tactile confirmation)
+press +  ──▶  LED lights immediately (tactile confirmation)
          ──▶  counter increments locally, display redraws
-         ──▶  HTTPS POST to the webhook
+         ──▶  HTTPS POST to the webhook, LED clears once delivered
          ──▶  stay awake ~30 s for more presses, then deep sleep
 ```
 
@@ -40,7 +40,8 @@ waits on the network.
 
 After the first press the Wi-Fi association and TLS session stay open for
 `SESSION_IDLE_TIMEOUT`, so a burst of presses costs one handshake instead of
-one per press. Presses 2..N land in roughly 200 ms rather than several seconds.
+one per press. Measured on hardware, the first POST takes 4.2 s and later ones about
+130 ms.
 
 ### Request format
 
@@ -61,7 +62,8 @@ Content-Type: application/json
   "age_ms":      0,                        // >0 if this is a delayed retry
   "battery_pct": 87,
   "battery_v":   3.92,
-  "sw_version":  "v3.0.0-counter.1"
+  "sw_version":  "v3.0.0-counter.1",
+  "build":       "3d33168b"                // git short SHA
 }
 ```
 
@@ -71,6 +73,31 @@ retried.
 `age_ms` exists because the device has no RTC — let the receiver stamp
 wall-clock time and back-date by `age_ms` so a delayed press does not land with
 the wrong timestamp.
+
+### The response has to carry a clock
+
+Every reply must be JSON with an absolute UTC epoch and the local offset in
+seconds:
+
+```json
+{"ts": 1785114718, "tz_offset": 7200}
+```
+
+That is the device's only source of time, and the scheduled reset below is the
+only thing that needs it. Without it presses and notifications carry on working
+normally and the counters simply never clear, which is not an obvious symptom.
+
+## Scheduled reset
+
+The counters can clear themselves on a schedule: `off`, `daily 03:00`,
+`weekly mon 03:00` or `monthly 1 03:00`, set in the portal. The device
+schedules its deep sleep wake for the boundary, clears, and POSTs an
+`"event": "reset"` with the cleared totals.
+
+Local time is whatever the receiver reports, DST included. If the clock has
+not been refreshed for 48 hours the reset suspends instead of clearing on a
+guess, and a period is only ever cleared once, so the autumn DST step does not
+wipe the counters twice.
 
 ### Notes for an n8n receiver
 
@@ -92,8 +119,13 @@ the n8n receiver, troubleshooting, and the compile-time tunables.
 The short version: hold any two buttons for 5 s → settings → button 1. The
 device starts an access point `HB-<random-id>` with password
 `HB-<serial-number>`, both unique per device and taken from the burnt eFuse.
-Portal fields are device name, **webhook URL**, **auth token**, static IP
-settings, and the six button labels.
+Portal fields are device name, **webhook URL**, **auth token**, **counter
+reset** schedule, **Wi-Fi country**, awake mode, static IP settings, and the
+six button labels.
+
+Set the Wi-Fi country if your router sits on channel 12 or 13. The ESP-IDF
+default defers to whatever the access point advertises and reverts on
+disconnect, so those channels can be missing from the scan list entirely.
 
 > The remaining pages under `docs/` are inherited from upstream and describe
 > the MQTT firmware. They do not apply to this fork.
@@ -130,7 +162,13 @@ industrial targets are gone.
 - HTTPS webhook transport (`src/webhook.{h,cpp}`)
 - Persistent counters and a monotonic sequence number in NVS
 - `SessionState` — the post-press awake window
-- A CI job that actually builds the firmware, with a flash-headroom check
+- A scheduled counter reset (`src/reset_schedule.{h,cpp}`) with the clock taken
+  from the webhook response
+- A serial command console in debug builds (`src/console.{h,cpp}`) so a press,
+  a clock jump or a sleep can be driven over the wire
+- Host unit tests for the schedule arithmetic and the reset decision
+- A CI job that actually builds the firmware, runs the tests, and checks flash
+  headroom
 
 **Bugs fixed along the way** (all present upstream at `v2.6.1`)
 
@@ -155,7 +193,7 @@ without warning.
 
 **Flash budget.** Upstream's baseline build used **95.8%** of its 0x140000 app
 partition. After the strip, and with SPIFFS shrunk to make room, this build uses
-**69.3%** of 0x1A0000. CI fails if it crosses 90%.
+**71.0%** of 0x1A0000. CI fails if it crosses 90%.
 
 ---
 

@@ -20,17 +20,22 @@ Grab the `firmware-original` artifact from a
 ```bash
 # Recommended: start clean. eFuse identity (serial, model, HW rev) is burnt
 # and survives this — only settings and Wi-Fi credentials are cleared.
-esptool.py --chip esp32s2 --port /dev/ttyACM0 erase_flash
+esptool --chip esp32s2 --port /dev/ttyACM0 erase-flash
 
-esptool.py --chip esp32s2 --port /dev/ttyACM0 --baud 921600 \
-  --before default_reset --after hard_reset \
-  write_flash -z --flash_mode dio --flash_freq 80m --flash_size 4MB \
+esptool --chip esp32s2 --port /dev/ttyACM0 --baud 921600 \
+  --before default-reset --after hard-reset \
+  write-flash -z --flash-mode dio --flash-freq 80m --flash-size 4MB \
   0x1000   bootloader.bin \
   0x8000   partitions.bin \
   0xe000   ota_data_initial.bin \
   0x10000  firmware.bin \
   0x350000 spiffs.bin
 ```
+
+Command and option names are the esptool v5 spelling, with hyphens rather
+than underscores (`write-flash`, not `write_flash`). v4 accepts only the
+underscore form, so on an older install either upgrade with
+`pip install -U esptool` or substitute underscores throughout.
 
 Or from a checkout: `pio run -e original_release -t upload -t uploadfs`.
 
@@ -78,13 +83,46 @@ The portal opens at `http://192.168.4.1` and closes after 10 minutes.
 | **Webhook URL** | Full HTTPS URL of the n8n **production** webhook. Max 128 chars |
 | **Auth Token** | Sent as `Authorization: Bearer <token>`. Max 128 chars. Masked in the page |
 | **Wi-Fi Country** | ISO code, e.g. `PL`, `DE`, `GB`, `US`. Blank uses the ESP-IDF default. **Set this if your router uses channel 12 or 13** — see below |
-| **Awake Mode** | `1` keeps the device from deep sleeping — needed to hold a USB serial console open. `0` for normal use. Drains the battery fast |
+| **Awake Mode** | `1` keeps the device from deep sleeping, which is what you want while watching a serial log. `0` for normal use. Drains the battery fast |
+| **Counter Reset** | When the counters clear themselves. `off`, `daily 03:00`, `weekly mon 03:00`, `monthly 1 03:00`. See below |
 | Static IP / Gateway / Subnet / DNS / DNS 2 | Optional — leave blank for DHCP. All three of IP, gateway and subnet must be set for static to apply |
 | Button 1-6 Label | See below |
 
 **HTTPS is required.** The device attaches the ESP-IDF root CA bundle and
 verifies the chain; a plain `http://` URL or an untrusted certificate will
 fail the POST.
+
+### Counter reset schedule
+
+One free-text field, parsed into four modes:
+
+| Value | Clears |
+|---|---|
+| `off` | Never |
+| `daily 03:00` | Every day at 03:00 local |
+| `weekly mon 03:00` | Mondays at 03:00 local. Day names are the first three letters, `sun` to `sat` |
+| `monthly 1 03:00` | The 1st at 03:00 local. Day is capped at 28 so every month has one |
+
+Anything unparseable falls back to `daily 03:00` rather than silently
+disabling the reset. Times are 24-hour.
+
+At the boundary the device clears both counters, redraws, and POSTs an
+`"event": "reset"` carrying the cleared totals. On battery it schedules its
+deep sleep wake for the boundary, so the clear happens on time rather than
+at the next press.
+
+**Local time comes from the receiver, not the device.** There is no RTC and
+no NTP, so the offset is whatever the webhook response says it is, DST
+included. If the response does not carry a clock the reset never fires at
+all, and nothing else misbehaves to hint at it. See section 5.
+
+Two behaviours worth knowing:
+
+- If the clock has not been refreshed for `CLOCK_STALE_SECONDS` (48 h) the
+  reset suspends rather than clearing on a guess.
+- A period is cleared at most once. Local time moving backwards over the
+  boundary, which happens at the autumn DST step and after a clock
+  correction, does not clear again on the way back through.
 
 ### Button labels
 
@@ -185,7 +223,26 @@ Request body:
   "age_ms":      0,            // >0 if this is a delayed retry
   "battery_pct": 87,
   "battery_v":   3.92,
-  "sw_version":  "v3.0.0-counter.1"
+  "sw_version":  "v3.0.0-counter.1",
+  "build":       "3d33168b"    // git short SHA of the firmware
+}
+```
+
+A scheduled reset sends `"event": "reset"` instead, with the cleared totals
+as an object rather than one request per counter:
+
+```jsonc
+{
+  "device":     "HBTNS-24011234-123XYZ",
+  "seq":        838,
+  "event":      "reset",
+  "reset_mode": "daily",
+  "counts":     { "a": 0, "b": 0 },
+  "age_ms":     0,
+  "battery_pct": 87,
+  "battery_v":  3.92,
+  "sw_version": "v3.0.0-counter.1",
+  "build":      "3d33168b"
 }
 ```
 
@@ -247,13 +304,19 @@ curl -s -X POST https://your-n8n/webhook/<path> \
 
 ## 6. Verify
 
-1. Press button 1. The LED blinks immediately — that is local, and confirms
-   nothing about the network.
-2. The display updates within a second or two.
+1. Press **button 3** (the count button for counter A). Its LED lights and
+   stays lit while the request is in flight, then goes out once the
+   receiver has answered. Solid means pending, dark means delivered, three
+   quick blinks means it failed.
+2. The display updates within a second or two, without waiting on the
+   network.
 3. n8n shows an execution; Telegram gets a message.
-4. Press three more times in quick succession. Only the first should be
-   slow — presses 2-4 reuse the open TLS session and land in ~200 ms.
-5. After ~30 s of no input the device goes back to deep sleep.
+4. Press three more times in quick succession. Only the first is slow.
+   Presses 2-4 reuse the open TLS session and land in roughly 130 ms.
+5. Press **button 5** to decrement, and confirm the count goes back down.
+6. Press **button 1**. It is a title button, so it blinks twice and does
+   nothing else. No POST, no change to the count.
+7. After ~30 s of no input the device goes back to deep sleep.
 
 Serial at 115200 baud shows the whole flow (`pio device monitor`).
 
@@ -375,7 +438,7 @@ These have no portal field and need a rebuild — all in
 
 | Constant | Default | What it does |
 |---|---|---|
-| `SESSION_IDLE_TIMEOUT` | `30000` ms | How long to stay awake after a press. Your original ask was ~2 min; raise if a burst spans longer gaps |
+| `SESSION_IDLE_TIMEOUT` | `30000` ms | How long to stay awake after a press. Raise it if presses in a burst are spaced further apart than this, at the cost of battery |
 | `HEARTBEAT_INTERVAL_DFLT` | `720` min | Battery-only timer wake |
 | `HTTP_TIMEOUT` | `10000` ms | Per-attempt timeout |
 | `HTTP_MAX_ATTEMPTS` | `3` | Retries per press, within the awake window |

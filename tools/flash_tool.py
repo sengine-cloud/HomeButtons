@@ -129,8 +129,8 @@ def flash_firmware(port: str, baud: int, fw_zip_path: str, test_setup: FactoryTe
         generate_nvs(nvs_path, partitions["nvs"]
                      ["Size"], test_setup)
 
-        tokens = ["esptool.py", "--port", port, "--baud", str(baud),
-                  "--after", "no_reset", "write_flash",
+        tokens = ["esptool", "--port", port, "--baud", str(baud),
+                  "--after", "no-reset", "write-flash",
                   "0x1000", os.path.join(tmp_dir, "bootloader.bin"),
                   "0x8000", os.path.join(tmp_dir, "partitions.bin"),
                   partitions["nvs"]["Offset"], nvs_path,
