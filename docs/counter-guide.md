@@ -22,7 +22,7 @@ Grab the `firmware-original` artifact from a
 # and survives this — only settings and Wi-Fi credentials are cleared.
 esptool --chip esp32s2 --port /dev/ttyACM0 erase-flash
 
-esptool --chip esp32s2 --port /dev/ttyACM0 --baud 921600 \
+esptool --chip esp32s2 --port /dev/ttyACM0 \
   --before default-reset --after hard-reset \
   write-flash -z --flash-mode dio --flash-freq 80m --flash-size 4MB \
   0x1000   bootloader.bin \
@@ -36,6 +36,58 @@ Command and option names are the esptool v5 spelling, with hyphens rather
 than underscores (`write-flash`, not `write_flash`). v4 accepts only the
 underscore form, so on an older install either upgrade with
 `pip install -U esptool` or substitute underscores throughout.
+
+All five images matter. Leaving `0x10000 firmware.bin` out is an easy
+mistake to make and a confusing one, because the flash succeeds, the
+device boots, and it carries on running whatever application was there
+before.
+
+### Picking the right port
+
+`/dev/ttyACM0` above is only an example. If anything else USB-serial is
+plugged in, the numbering is whatever order the kernel enumerated things,
+so check rather than guess:
+
+```bash
+for d in /dev/ttyACM*; do
+  printf '%s\t' "$d"
+  udevadm info -q property -n "$d" | grep -E '^ID_VENDOR=|^ID_MODEL=' | tr '\n' ' '
+  echo
+done
+```
+
+The device is the one reporting `ID_VENDOR=Espressif`:
+
+```
+/dev/ttyACM1    ID_VENDOR=Flipper_Devices_Inc. ID_MODEL=Lagums
+/dev/ttyACM2    ID_VENDOR=Espressif ID_MODEL=ESP32-S2
+```
+
+**Use the Espressif port, not a USB-to-serial adapter wired to the debug
+header.** A serial adapter does reach the ROM bootloader, since it listens
+on UART0 as well, and esptool will connect and report the chip correctly,
+which makes it look like the right choice. Two things then go wrong:
+
+- Anything much above the default baud rate fails partway through. The
+  handshake succeeds, `Changing baud rate to 921600` succeeds, and the next
+  read times out with `Unable to verify flash chip connection`. Drop
+  `--baud` entirely on the Espressif port, where it is a native USB CDC and
+  the number is ignored.
+- `--before default-reset` cannot work, because DTR and RTS on the adapter
+  are not wired to the chip's EN and IO0. It only appears to work if the
+  device already happens to be in download mode. On the Espressif port
+  esptool resets the running application into the bootloader over USB by
+  itself, with no buttons.
+
+**Expect the first attempt to fail** on the Espressif port with
+`No such device` or `Failed to connect`. Triggering that reset tears down
+the USB device esptool is talking through, invalidating its own handle.
+The board is now in the bootloader, so run the same command again and it
+succeeds. In a script, retry:
+
+```bash
+for i in 1 2 3; do esptool ... && break; sleep 3; done
+```
 
 Or from a checkout: `pio run -e original_release -t upload -t uploadfs`.
 
@@ -371,24 +423,20 @@ A CMSIS-DAP probe on the same header gives gdb as well:
 `pio run -e original_debug -t upload` then `pio debug`, using the
 `esp32s2_cmsisdap.cfg` already in the repo.
 
-### Flashing without touching the board
+### Reflashing while iterating
 
-The firmware presents a USB CDC device while the app runs, so esptool can
-reset it into the bootloader over USB-C — no BOOT+RST needed:
-
-```bash
-esptool --chip esp32s2 --port /dev/ttyACM0 --after hard-reset \
-  write-flash -z 0x10000 firmware.bin 0x350000 spiffs.bin
-```
-
-**Expect the first attempt to fail.** Triggering the reset tears down the
-CDC device, so esptool's handle goes stale mid-command and it exits with
-`No such device`. The board is now sitting in the ROM bootloader; run the
-same command again and it succeeds. Scripts should just retry:
+The firmware presents a USB CDC device while the application runs, so
+esptool resets it into the bootloader over USB-C on its own. You never need
+BOOT+RST. For a code change with the icons untouched, only the application
+image is worth rewriting:
 
 ```bash
-for i in 1 2 3; do esptool ... && break; sleep 3; done
+esptool --chip esp32s2 --port /dev/ttyACM2 --after hard-reset \
+  write-flash -z 0x10000 firmware.bin
 ```
+
+Section 1 covers picking the port, why the first attempt fails, and why
+`--baud` is best left off.
 
 ## 9. Serial console
 
