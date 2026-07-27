@@ -204,6 +204,47 @@ receipt and subtract `age_ms` for a delayed delivery.
 A `"event": "heartbeat"` request arrives on the timer wake (default every
 12 h) carrying battery level only — no `counter`, `delta` or `count`.
 
+### The response is not optional
+
+The device has no RTC and no NTP. **Its only source of time is the webhook
+response**, so every reply must be JSON carrying an absolute UTC epoch and
+the local offset in seconds:
+
+```json
+{ "ts": 1785114718, "tz_offset": 7200 }
+```
+
+In n8n, set the Webhook node's *Response Data* to an expression:
+
+```
+{{ JSON.stringify({ ts: Math.floor($now.toSeconds()),
+                    tz_offset: $now.setZone("Europe/Warsaw").offset * 60 }) }}
+```
+
+Naming the zone explicitly is deliberate. `$now.offset` alone reports the
+n8n **instance** timezone, which is UTC on a default install — the device
+would then treat `daily 03:00` as 03:00 UTC. Pinning the zone in the
+expression is DST-correct and does not depend on a setting nobody can see
+from the device.
+
+Two failure modes worth recognising, because neither looks like an error:
+
+- **An unpublished draft.** n8n serves the last *published* version. Editing
+  the response expression and not publishing leaves the device receiving
+  `Workflow got started.` as plain text. It logs `response not JSON`, keeps
+  counting perfectly, and simply never learns the time — so the scheduled
+  reset never fires.
+- **A missing `content-type`.** Add a `content-type: application/json`
+  response header alongside the expression.
+
+Check it from a shell rather than from the device:
+
+```bash
+curl -s -X POST https://your-n8n/webhook/<path> \
+  -H 'content-type: application/json' -d '{"event":"sync"}'
+# {"ts":1785114718,"tz_offset":7200}
+```
+
 ## 6. Verify
 
 1. Press button 1. The LED blinks immediately — that is local, and confirms
@@ -229,15 +270,17 @@ Serial at 115200 baud shows the whole flow (`pio device monitor`).
 | Device never sleeps | It is on USB power, so it stays in awake mode |
 | **Your network is missing from the setup scan list** | Router is on channel 12 or 13. The ESP-IDF default defers to the AP's advertised country and reverts on disconnect, so those channels are never scanned. Set **Wi-Fi Country** to a code whose range covers them (any EU code gives 1-13). `UA` is not supported by ESP-IDF — use `PL`. Also check the network is 2.4 GHz and not hidden |
 | Placeholder glyph instead of an icon | Icon not in the SPIFFS image — only `plus` and `minus` ship. Re-run `tools/make_icons.py` and `-t uploadfs` |
+| **Counters never clear at the scheduled time** | The clock is not trusted. `time` on the console reports `fresh 0` — the device suspends scheduled resets rather than clearing on a guess. Check the receiver is returning `ts`; `sync` forces the attempt |
+| Device returns `ts` but the reset fires at the wrong hour | `tz_offset` is wrong. The device applies whatever the receiver sends and knows nothing about zones — see the n8n note below |
 
 ## 8. Reading logs
 
-Two routes, and they differ by build:
+Two routes, both at 115200, and both live in either build:
 
-| Build | Console | How to read it |
+| Route | How to read it | Survives deep sleep |
 |---|---|---|
-| `original_release` | **UART0**, 115200 | `TX` + `GND` on the CMSIS-DAP header, via a 3.3 V USB-serial adapter |
-| `original_debug` | **USB CDC**, 115200 | Just the USB-C cable |
+| **UART0** | `TX` + `GND` on the CMSIS-DAP header, via a 3.3 V USB-serial adapter | Yes — the port belongs to the adapter, not the device |
+| **USB CDC** | Just the USB-C cable | No — the port vanishes and re-enumerates on every wake |
 
 ```bash
 pio run -e original_debug -t upload && pio device monitor
@@ -265,7 +308,62 @@ A CMSIS-DAP probe on the same header gives gdb as well:
 `pio run -e original_debug -t upload` then `pio debug`, using the
 `esp32s2_cmsisdap.cfg` already in the repo.
 
-## 9. Compile-time settings
+### Flashing without touching the board
+
+The firmware presents a USB CDC device while the app runs, so esptool can
+reset it into the bootloader over USB-C — no BOOT+RST needed:
+
+```bash
+esptool --chip esp32s2 --port /dev/ttyACM0 --after hard-reset \
+  write-flash -z 0x10000 firmware.bin 0x350000 spiffs.bin
+```
+
+**Expect the first attempt to fail.** Triggering the reset tears down the
+CDC device, so esptool's handle goes stale mid-command and it exits with
+`No such device`. The board is now sitting in the ROM bootloader; run the
+same command again and it succeeds. Scripts should just retry:
+
+```bash
+for i in 1 2 3; do esptool ... && break; sleep 3; done
+```
+
+## 9. Serial console
+
+Both serial routes accept commands as well as printing logs. Type `help`
+for the list. It is present in both builds — reaching a misbehaving device
+is exactly when you want it, and both ports need physical access anyway.
+
+| Command | What it does |
+|---|---|
+| `status` | Build stamps, uptime, heap, state machine, Wi-Fi, battery, counters, seq, endpoint, clock, schedule |
+| `press <1-6>` | Injects a press through the real handler — counter, label, display, LED, POST |
+| `counter [a\|b [n]]` | Shows or forces a counter. Clamped exactly as a press is |
+| `sched [spec]` | Shows or sets the reset schedule (`off`, `daily 03:00`, `weekly mon 04:00`, `monthly 1 05:00`) |
+| `reset` | Runs the boundary check now |
+| `time` | UTC, local, offset, sync age, and whether the clock is trusted |
+| `time set <epoch> [offset]` | Overrides the clock. Lets a weekly or monthly boundary be tested without waiting for it |
+| `sync` / `post` | Forces a time-sync or heartbeat POST |
+| `endpoint [url]` / `token [tok]` | Shows or sets the webhook target. The token is never echoed back, only its length |
+| `wifi` | SSID, BSSID, channel, RSSI, applied vs configured country |
+| `awake [0\|1]` | Shows or sets awake mode |
+| `sleep [secs]` | Sleeps now, optionally forcing the wake time |
+| `save` / `restart` / `setup` / `wifisetup` | Persist NVS · reboot · reboot into either portal |
+
+`press` is the one that makes the rest testable: the whole counter flow can
+be exercised without a finger on the device, and `time set` collapses a
+day's wait into a second.
+
+Two things worth knowing:
+
+- **Commands are executed on the main task**, which blocks for the duration
+  of an HTTPS POST. A reader task keeps buffering meanwhile, but the queue
+  is four deep — paste a longer block than that while the network is slow
+  and you will see `busy, command dropped` rather than silent loss.
+- **`sleep` with no argument uses the schedule.** If the next boundary is
+  20 hours away, that is how long the device is gone. Pass an explicit
+  number of seconds when testing.
+
+## 10. Compile-time settings
 
 These have no portal field and need a rebuild — all in
 `Firmware/HomeButtonsArduino/src/config.h`:
@@ -277,6 +375,9 @@ These have no portal field and need a rebuild — all in
 | `HTTP_TIMEOUT` | `10000` ms | Per-attempt timeout |
 | `HTTP_MAX_ATTEMPTS` | `3` | Retries per press, within the awake window |
 | `COUNTER_MIN` / `COUNTER_MAX` | `0` / `999999` | Clamp range |
+| `RESET_CHECK_INTERVAL` | `10000` ms | How often a device left awake re-tests the reset boundary. Only bounds how late a clear can be |
+| `CLOCK_STALE_SECONDS` | `48` h | Past this since the last sync, the clock is not trusted and scheduled resets suspend rather than fire on a guess |
+| `CLOCK_RESYNC_SECONDS` | `6` h | How old the clock may get before a connect spends a request re-syncing it |
 | `BTN_COUNTER_TITLE` | `{1, 2}` | Title buttons, per counter |
 | `BTN_COUNTER_INC` | `{3, 4}` | Count / increment buttons |
 | `BTN_COUNTER_DEC` | `{5, 6}` | Decrement buttons |
