@@ -12,6 +12,7 @@
 #include "logger.h"
 #include "hardware.h"
 #include "setup.h"
+#include "console.h"
 #include "reset_schedule.h"
 #include "display/display.h"
 #include "button_ui/btn_sw_led.h"
@@ -214,6 +215,14 @@ class App : public AppStateMachine, public Logger {
   // display follows the button press regardless of what the state machine
   // is doing - notably while the network is still connecting.
   void _service_display();
+  // Drains the console's line queue. Same task as _service_webhook(), so a
+  // command may touch the webhook, NVS and the counters freely.
+  void _service_console();
+  // A press injected from the console. Applies it exactly as a real one,
+  // then nudges the state machine the way the UI callback would have -
+  // without which an injected press in sleep mode would sit in the queue
+  // until the idle timeout slept the device with it undelivered.
+  void _console_press(uint8_t btn_id);
 
   // Counter plumbing ---------------------------------------------------
   // Returns true and fills idx/delta when btn_id is one of the four
@@ -276,6 +285,7 @@ class App : public AppStateMachine, public Logger {
   Webhook webhook_;
   HardwareDefinition hw_;
   HBSetup setup_;
+  Console console_;
 
   // Button callbacks run on the UI task, so a press may not block on HTTP or
   // NVS there. handle_ui_event() only touches RAM and pushes onto this queue;
@@ -322,6 +332,7 @@ class App : public AppStateMachine, public Logger {
   uint32_t shutdown_cmd_time_ = 0;
 
   friend class HBSetup;
+  friend class Console;
 
   friend class AppSMStates::InitState;
   friend class AppSMStates::AwakeModeIdleState;

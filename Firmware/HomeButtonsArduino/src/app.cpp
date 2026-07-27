@@ -26,7 +26,8 @@ App::App()
       display_(device_state_),
       network_(device_state_),
       webhook_(device_state_),
-      setup_(*this) {
+      setup_(*this),
+      console_(*this) {
   press_queue_ = xQueueCreate(PRESS_QUEUE_SIZE, sizeof(PressQueueElement));
   if (press_queue_ == nullptr) error("failed to create press queue");
   state_mutex_ = xSemaphoreCreateRecursiveMutex();
@@ -478,6 +479,23 @@ void App::_handle_ui_event_global(UserInput::Event event) {
   device_state_.flags().last_user_input_time = millis();
 }
 
+void App::_service_console() { console_.service(); }
+
+void App::_console_press(uint8_t btn_id) {
+  _handle_counter_press(btn_id);
+  device_state_.flags().last_user_input_time = millis();
+  // Keeps an open session open, mirroring SessionState::handle_ui_event().
+  session_last_input_time_ = millis();
+
+  // In sleep mode the device parks in SleepModeHandleInput waiting for a
+  // real button, and nothing there connects the network. Boot cause is left
+  // alone: if the wake really was a timer, NetConnectingState will deliver
+  // the press and then sleep, which is the honest outcome.
+  if (is_current_state<AppSMStates::SleepModeHandleInput>()) {
+    transition_to<AppSMStates::NetConnectingState>();
+  }
+}
+
 void App::_service_display() {
   if (!device_state_.flags().display_redraw) return;
   // Coalesce a burst so a run of presses does not queue up a full e-paper
@@ -520,6 +538,10 @@ void App::_main_task() {
   }
 
   device_state_.load_all(hw_);
+
+  // Before the display and the network, so a device that fails either is
+  // still reachable - which is the situation the console is most use in.
+  console_.begin();
 
   _begin_hw();
 
@@ -733,6 +755,7 @@ void App::_main_task() {
   debug("Starting main state machine loop");
   while (true) {
     loop();
+    _service_console();
     _service_webhook();
     _service_display();
     esp_task_wdt_reset();

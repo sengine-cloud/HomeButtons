@@ -71,6 +71,14 @@ class StateMachine {
     return std::holds_alternative<State *>(current_state_);
   }
 
+  // Which state the machine is sitting in, for diagnostics. The name comes
+  // straight from the state object, so it cannot drift from the transition
+  // log lines above.
+  const char *current_state_name() const {
+    return std::visit([](auto statePtr) { return statePtr->get_name(); },
+                      current_state_);
+  }
+
   void _enter_state(std::variant<States *...> state) {
     base_.debug(
         "Entering state %s::%s", name_,

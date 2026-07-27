@@ -44,6 +44,11 @@ static constexpr char DOCS_LINK[] =
 // The setup AP password is derived per-device from the eFuse random ID, so
 // there is no shared default. See DeviceState::get_ap_password().
 
+// ------ serial console ------
+// Both the log output and the command console run at this rate, on the USB
+// CDC and on UART0 alike.
+static constexpr uint32_t SERIAL_BAUD_RATE = 115200;
+
 // ------ buttons ------
 static constexpr uint8_t NUM_BUTTONS = 6;
 static constexpr uint8_t BTN_LABEL_MAXLEN = 56;
