@@ -4,6 +4,7 @@
 #include <SPIFFS.h>
 #include <U8g2_for_Adafruit_GFX.h>
 #include <qrcode.h>
+#include <time.h>
 
 #include "bitmaps.h"
 #include "config.h"
@@ -555,6 +556,48 @@ void Display::draw_info() {
     w = u8g2.getUTF8Width(status);
     u8g2.setCursor(WIDTH / 2 - w / 2, 250);
     u8g2.print(status);
+  }
+
+  // Clock and build stamp. This screen is one button hold away from idle,
+  // where the device info screen is three steps into the settings menu, so
+  // the two things worth checking on a device that is behaving oddly live
+  // here: whether it knows the time, and what is actually flashed on it.
+  u8g2.setFont(u8g2_font_profont12_tr);
+
+  if (device_state_.clock_valid()) {
+    const time_t local =
+        time(nullptr) + static_cast<time_t>(device_state_.tz_offset());
+    struct tm tm_local = {};
+    gmtime_r(&local, &tm_local);
+    text = UIState::MessageType("%04d-%02d-%02d %02d:%02d",
+                                tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+                                tm_local.tm_mday, tm_local.tm_hour,
+                                tm_local.tm_min);
+  } else {
+    // No RTC and no NTP: the clock arrives with the first webhook response.
+    text = "clock not set";
+  }
+  w = u8g2.getUTF8Width(text.c_str());
+  u8g2.setCursor(WIDTH / 2 - w / 2, 272);
+  u8g2.print(text.c_str());
+
+  // One line while the two images agree, which is the normal case. A
+  // mismatch means a forgotten uploadfs and is worth the second line.
+  if (spiffs_build_ == BUILD_ID) {
+    text = UIState::MessageType("build %s", BUILD_ID);
+    w = u8g2.getUTF8Width(text.c_str());
+    u8g2.setCursor(WIDTH / 2 - w / 2, 286);
+    u8g2.print(text.c_str());
+  } else {
+    text = UIState::MessageType("fw %s", BUILD_ID);
+    w = u8g2.getUTF8Width(text.c_str());
+    u8g2.setCursor(WIDTH / 2 - w / 2, 283);
+    u8g2.print(text.c_str());
+    text = UIState::MessageType(
+        "fs %s", spiffs_build_.empty() ? "missing" : spiffs_build_.c_str());
+    w = u8g2.getUTF8Width(text.c_str());
+    u8g2.setCursor(WIDTH / 2 - w / 2, 294);
+    u8g2.print(text.c_str());
   }
 
   disp->display();

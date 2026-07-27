@@ -122,10 +122,10 @@ fields are empty — the device boots, counts locally, and silently logs
 |---|---|
 | Hold **any two buttons, 5 s** | Settings menu |
 | Then press **button 1** | Setup portal (Wi-Fi + all settings) |
-| Then press **button 2** | Wi-Fi only — also carries the **Wi-Fi Country** field |
+| Then press **button 2** | Wi-Fi only, and the only place with the **Wi-Fi Country** field |
 | Then press **button 3** | Restart |
 | Then press **button 4** | Cancel |
-| In settings, hold **button 1, 2 s** | Device Info screen |
+| In settings, hold **button 1, 2 s** | Device info screen: name, versions, both build stamps, IP, battery |
 | In settings, hold **button 3, 10 s** | Factory reset |
 
 The settings menu times out after 30 s.
@@ -154,7 +154,6 @@ The portal opens at `http://192.168.4.1` and closes after 10 minutes.
 | **Device Name** | Cosmetic; shown on the settings screen |
 | **Webhook URL** | Full HTTPS URL of the n8n **production** webhook. Max 128 chars |
 | **Auth Token** | Sent as `Authorization: Bearer <token>`. Max 128 chars. Masked in the page |
-| **Wi-Fi Country** | ISO code, e.g. `PL`, `DE`, `GB`, `US`. Blank uses the ESP-IDF default. **Set this if your router uses channel 12 or 13** — see below |
 | **Awake Mode** | `1` keeps the device from deep sleeping, which is what you want while watching a serial log. `0` for normal use. Drains the battery fast |
 | **Counter Reset** | When the counters clear themselves. `off`, `daily 03:00`, `weekly mon 03:00`, `monthly 1 03:00`. See below |
 | Static IP / Gateway / Subnet / DNS / DNS 2 | Optional — leave blank for DHCP. All three of IP, gateway and subnet must be set for static to apply |
@@ -163,6 +162,13 @@ The portal opens at `http://192.168.4.1` and closes after 10 minutes.
 **HTTPS is required.** The device attaches the ESP-IDF root CA bundle and
 verifies the chain; a plain `http://` URL or an untrusted certificate will
 fail the POST.
+
+**Wi-Fi Country is not on this page.** It is in the Wi-Fi portal, settings
+then button 2, on the same page as the network list. That is a deliberate
+split: this portal puts its parameters on a page of their own, away from
+the scan results, and the country is the setting that decides which
+channels appear in those results. Setting it next to the list you are
+staring at is the point.
 
 ### Counter reset schedule
 
@@ -386,6 +392,10 @@ curl -s -X POST https://your-n8n/webhook/<path> \
 4. Press three more times in quick succession. Only the first is slow.
    Presses 2-4 reuse the open TLS session and land in roughly 130 ms.
 5. Press **button 5** to decrement, and confirm the count goes back down.
+   Hold any single button for 2 s to see the status screen: battery, the
+   local time the device believes it is, and the build stamp of what is
+   flashed. `clock not set` there means the receiver is not returning a
+   clock, and the scheduled reset will not run.
 6. Press **button 1**. It is a title button, so it blinks twice and does
    nothing else. No POST, no change to the count.
 7. After ~30 s of no input the device goes back to deep sleep.
