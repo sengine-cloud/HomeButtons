@@ -368,8 +368,9 @@ void Console::_cmd_endpoint(int argc, char** argv) {
   if (argc >= 2) {
     st.set_endpoint_url(EndpointUrlType(argv[1]));
     st.save_all();
-    // The HTTPClient holds the old host; force a rebuild on the next send.
-    app_.webhook_.begin();
+    // No client teardown needed: _post() calls http_.begin() with the URL
+    // read fresh from state on every attempt, so the next send picks this
+    // up - including a change of host, keep-alive socket notwithstanding.
   }
   _out("endpoint  %s\n",
        st.endpoint_url().empty() ? "(unset)" : st.endpoint_url().c_str());

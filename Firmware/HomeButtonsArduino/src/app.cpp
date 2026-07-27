@@ -500,6 +500,10 @@ void App::_service_webhook() {
       // sending when nothing else is going out anyway.
       webhook_.sync_time();
     }
+    // An unreachable receiver costs HTTP_MAX_ATTEMPTS * HTTP_TIMEOUT plus
+    // backoff per send, and a heartbeat followed by a reset report is two
+    // of those - enough to pass WDT_TIMEOUT without this.
+    esp_task_wdt_reset();
 
     // The clock may only just have become valid, so re-test the boundary
     // now that it has.
@@ -510,6 +514,7 @@ void App::_service_webhook() {
     if (webhook_.send_reset(reset_schedule::mode_name(_reset_spec().mode))) {
       reset_to_report_ = false;
     }
+    esp_task_wdt_reset();
   }
 
   _flush_pending();
