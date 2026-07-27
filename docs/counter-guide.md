@@ -330,8 +330,13 @@ for i in 1 2 3; do esptool ... && break; sleep 3; done
 ## 9. Serial console
 
 Both serial routes accept commands as well as printing logs. Type `help`
-for the list. It is present in both builds — reaching a misbehaving device
-is exactly when you want it, and both ports need physical access anyway.
+for the list.
+
+**Debug builds only** (`original_debug`). The console can rewrite the
+webhook URL and auth token and reopen the setup portal, with no
+authentication beyond physical access, so it is compiled out of
+`original_release` entirely - 26 KB of flash and ~4 KB of RAM with it.
+Build and flash `original_debug` when you need it.
 
 | Command | What it does |
 |---|---|

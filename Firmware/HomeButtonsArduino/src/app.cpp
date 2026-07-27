@@ -26,8 +26,12 @@ App::App()
       display_(device_state_),
       network_(device_state_),
       webhook_(device_state_),
-      setup_(*this),
-      console_(*this) {
+      setup_(*this)
+#ifdef HOME_BUTTONS_DEBUG
+      ,
+      console_(*this)
+#endif
+{
   press_queue_ = xQueueCreate(PRESS_QUEUE_SIZE, sizeof(PressQueueElement));
   if (press_queue_ == nullptr) error("failed to create press queue");
   state_mutex_ = xSemaphoreCreateRecursiveMutex();
@@ -525,7 +529,11 @@ void App::_handle_ui_event_global(UserInput::Event event) {
   device_state_.flags().last_user_input_time = millis();
 }
 
-void App::_service_console() { console_.service(); }
+void App::_service_console() {
+#ifdef HOME_BUTTONS_DEBUG
+  console_.service();
+#endif
+}
 
 bool App::_webhook_pending() const {
   // The connect event counts as outstanding work: it is what triggers the
@@ -618,7 +626,9 @@ void App::_main_task() {
 
   // Before the display and the network, so a device that fails either is
   // still reachable - which is the situation the console is most use in.
+#ifdef HOME_BUTTONS_DEBUG
   console_.begin();
+#endif
 
   _begin_hw();
 

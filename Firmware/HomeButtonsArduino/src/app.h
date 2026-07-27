@@ -12,7 +12,9 @@
 #include "logger.h"
 #include "hardware.h"
 #include "setup.h"
+#ifdef HOME_BUTTONS_DEBUG
 #include "console.h"
+#endif
 #include "reset_schedule.h"
 #include "display/display.h"
 #include "button_ui/btn_sw_led.h"
@@ -293,7 +295,13 @@ class App : public AppStateMachine, public Logger {
   Webhook webhook_;
   HardwareDefinition hw_;
   HBSetup setup_;
+  // Debug builds only. The console can rewrite the endpoint and the auth
+  // token, and reopen the setup portal, with no authentication beyond
+  // physical access - and it costs ~4 KB of RAM that a release build on
+  // this part would rather keep.
+#ifdef HOME_BUTTONS_DEBUG
   Console console_;
+#endif
 
   // Button callbacks run on the UI task, so a press may not block on HTTP or
   // NVS there. handle_ui_event() only touches RAM and pushes onto this queue;

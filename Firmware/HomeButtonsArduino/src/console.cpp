@@ -1,3 +1,8 @@
+// Debug builds only - see the console_ member in app.h. Guarding the whole
+// translation unit rather than just the call sites keeps the command table
+// and its handlers out of a release image entirely.
+#ifdef HOME_BUTTONS_DEBUG
+
 #include "console.h"
 
 #include <WiFi.h>
@@ -469,3 +474,5 @@ void Console::_cmd_wifisetup(int, char**) {
   delay(100);
   ESP.restart();
 }
+
+#endif  // HOME_BUTTONS_DEBUG
