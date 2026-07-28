@@ -120,12 +120,15 @@ The short version: hold any two buttons for 5 s → settings → button 1. The
 device starts an access point `HB-<random-id>` with password
 `HB-<serial-number>`, both unique per device and taken from the burnt eFuse.
 Portal fields are device name, **webhook URL**, **auth token**, **counter
-reset** schedule, awake mode, static IP settings, and the six button labels.
+reset** schedule, **Wi-Fi country**, awake mode, static IP settings, and the
+six button labels. They appear on the Wi-Fi page as well as on their own
+Setup page, so either one saves them.
 
-**Wi-Fi country** lives in the Wi-Fi portal instead (settings, then button 2),
-next to the network list. Set it if your router sits on channel 12 or 13: the
-ESP-IDF default defers to whatever the access point advertises and reverts on
-disconnect, so those channels can be missing from the scan entirely.
+Set the Wi-Fi country if your router sits on channel 12 or 13. The ESP-IDF
+default defers to whatever the access point advertises and reverts on
+disconnect, so those channels can be missing from the scan entirely. It is
+listed first, directly under the network fields, because it decides what the
+scan returns.
 
 > The remaining pages under `docs/` are inherited from upstream and describe
 > the MQTT firmware. They do not apply to this fork.
