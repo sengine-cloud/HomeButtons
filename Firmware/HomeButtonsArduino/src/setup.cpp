@@ -279,7 +279,20 @@ void HBSetup::start_setup() {
   wifi_manager.setSaveParamsCallback(
       std::bind(&HBSetup::save_params_callback, this));
   wifi_manager.setBreakAfterConfig(true);
-  wifi_manager.setParamsPage(true);
+  // Parameters render on the Wi-Fi page and on the Setup page both.
+  //
+  // setParamsPage(true) confines them to Setup, which is where Wi-Fi
+  // Country used to sit: the field that decides which channels a scan
+  // returns, on a different page from the scan results. WiFiManager gates
+  // rendering and saving on the same _paramsInWifi flag, so there is no way
+  // to place one parameter on the Wi-Fi page and leave the rest on Setup.
+  //
+  // What the flag does not gate is the Setup page itself: handleParam()
+  // renders unconditionally. So turning the flag on and putting "param"
+  // back in the menu by hand gives both pages, and either one saves.
+  wifi_manager.setParamsPage(false);
+  std::vector<const char *> menu = {"wifi", "param", "info", "exit"};
+  wifi_manager.setMenu(menu);
   wifi_manager.setDarkMode(true);
   wifi_manager.setShowInfoUpdate(true);
 
@@ -319,12 +332,14 @@ void HBSetup::start_setup() {
   set_btn_label_params_from_device_state(app_.device_state_);
 #endif
 
+  // First, so that on the Wi-Fi page it lands directly under the network
+  // fields rather than below the button labels.
+  wifi_manager.addParameter(&wifi_country_param);
   wifi_manager.addParameter(&device_name_param);
   wifi_manager.addParameter(&endpoint_url_param);
   wifi_manager.addParameter(&auth_token_param);
   wifi_manager.addParameter(&awake_mode_param);
   wifi_manager.addParameter(&reset_spec_param);
-  wifi_manager.addParameter(&wifi_country_param);
   wifi_manager.addParameter(&static_ip_param);
   wifi_manager.addParameter(&gateway_param);
   wifi_manager.addParameter(&subnet_param);
